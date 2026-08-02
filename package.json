@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "icons": "rsvg-convert -w 1024 -h 1024 assets/icon.svg -o assets/icon-1024.png && rsvg-convert -w 72 -h 72 assets/tray.svg -o src-tauri/icons/tray.png && tauri icon assets/icon-1024.png && rm -rf src-tauri/icons/ios src-tauri/icons/android"
   },
   "dependencies": {
     "react": "^19.1.0",

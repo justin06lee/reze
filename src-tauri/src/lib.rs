@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use notify::{RecursiveMode, Watcher};
 use store::{AppState, Library};
+use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
@@ -306,8 +307,14 @@ pub fn run() {
             let sep = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(app, &[&palette_item, &open_item, &sep, &quit_item])?;
 
+            // A dedicated monochrome template glyph — the full-colour app icon
+            // would look wrong in the menu bar and would not tint with the
+            // system appearance. Embedded rather than bundled as a resource so
+            // it cannot go missing at runtime.
+            let tray_icon = Image::from_bytes(include_bytes!("../icons/tray.png"))?;
+
             TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(tray_icon)
                 .icon_as_template(true)
                 .menu(&menu)
                 .show_menu_on_left_click(true)

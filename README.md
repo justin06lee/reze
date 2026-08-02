@@ -96,6 +96,7 @@ bun run tauri dev      # run it
 bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/bundle
 ```
 
+- `assets/icon.svg`, `assets/tray.svg` — icon sources (see below)
 - `src-tauri/src/store.rs` — the JSON library, its schema, and the seed macros
 - `src-tauri/src/paste.rs` — clipboard + synthesized keystroke, and the permission check
 - `src-tauri/src/lib.rs` — windows, tray, global hotkey, file watcher, IPC commands
@@ -105,3 +106,29 @@ bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/b
 
 Both windows load the same bundle; `main.tsx` picks a component from
 `getCurrentWindow().label`.
+
+## Icons
+
+Original artwork, hand-written SVG, in `assets/`. Both are a bomb-head wearing a
+pulled grenade pin — a nod to the Bomb Devil's pin-in-the-neck that doubles as
+the app's premise: pull a tiny pin, get an explosion.
+
+| Source | Becomes | Notes |
+| --- | --- | --- |
+| `assets/icon.svg` | `src-tauri/icons/*` incl. `icon.icns`, `icon.ico` | Authored at 1024² with the macOS icon grid baked in (824² body, 100px margin), so generation only ever downscales. |
+| `assets/tray.svg` | `src-tauri/icons/tray.png` | The menu-bar glyph. |
+
+Regenerate both after editing either SVG (needs `rsvg-convert` — `brew install librsvg`):
+
+```bash
+bun run icons
+```
+
+The tray glyph is a macOS **template image**: pure black plus alpha, nothing
+else. The system ignores the colour and tints the alpha itself, so it comes out
+white on a dark menu bar and black on a light one automatically — drawing it
+white would break that. `tray-icon` normalises menu-bar images to 18pt tall
+preserving aspect ratio, so the glyph is authored square at 72px (4× for
+Retina) with deliberately fat strokes that survive the downscale. It is
+embedded with `include_bytes!` rather than bundled as a resource, so it cannot
+go missing at runtime.

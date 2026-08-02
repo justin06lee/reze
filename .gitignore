@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Intermediate render; regenerate from assets/icon.svg with `bun run icons`
+assets/icon-1024.png
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
