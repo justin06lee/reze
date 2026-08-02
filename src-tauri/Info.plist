@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Menu-bar-only app: no Dock tile, no app menu.
+
+    lib.rs already calls set_activation_policy(Accessory), but that runs during
+    setup, which is late enough for a bundled build to flash a Dock icon first.
+    Declaring it here means the app is an accessory from the moment it launches.
+  -->
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>

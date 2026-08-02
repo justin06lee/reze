@@ -17,6 +17,43 @@ you actually meant gets pasted into whatever app you were already in.
   ↵ select   ⌘↵ copy only   esc close          Edit macros
 ```
 
+## Install
+
+```bash
+bun install
+bun run tauri build
+```
+
+That produces both bundles under `src-tauri/target/release/bundle/`:
+
+| Path | What |
+| --- | --- |
+| `macos/Reze.app` | The app itself (~12 MB) |
+| `dmg/Reze_<version>_aarch64.dmg` | Disk image (~4 MB) with a drag-to-`Applications` layout |
+
+Open the `.dmg`, drag **Reze** onto **Applications**, then launch it. There is no
+Dock icon and no window on launch — it is a menu-bar app, so look for the bomb
+glyph up top. Press `⌘⇧Space` to confirm it is alive.
+
+Two things to know on first run:
+
+- **Grant Accessibility again.** The permission is per-binary, so the installed
+  `Reze.app` is a separate entry from any dev build you already approved. Open
+  the editor from the tray and use the banner.
+- **It is ad-hoc signed, not notarized.** Building and running it on your own
+  machine is fine — locally built apps never get the quarantine flag. If you
+  copy the `.dmg` to another Mac it *will* be flagged, and Gatekeeper will
+  refuse to open it. There, either right-click the app → **Open**, or strip the
+  flag: `xattr -dr com.apple.quarantine /Applications/Reze.app`. Signing it
+  properly needs a paid Apple Developer ID.
+
+`tauri build` targets the host architecture — `aarch64` on Apple Silicon. For a
+binary that also runs on Intel Macs, build
+`--target universal-apple-darwin` (requires `rustup target add x86_64-apple-darwin`).
+
+To start Reze automatically, add it under System Settings → General → Login
+Items. There is no built-in setting for it.
+
 ## Using it
 
 | Key | Does |
