@@ -61,6 +61,35 @@ Items. There is no built-in setting for it.
 
 ## Using it
 
+There are two ways in. **Search** it when you want to browse, or **expand in
+place** when you already know the trigger.
+
+### Expand in place
+
+Type a trigger straight into whatever you are already writing in, then press
+`⌥Space`:
+
+```
+Please do a full analysis|          ← your caret, in any app
+                    ⌥Space
+Please do a Be rigorous and concrete. Cite every claim with…
+```
+
+Reze reads back the words before your caret, and if they name a macro it swaps
+them for the expansion. No window appears, and the rest of the line is put back
+exactly as it was — the space in front, whatever followed the caret, all of it.
+If the words match nothing, nothing happens and your text is left alone.
+
+Matching ignores case and prefers the longest trigger, so with both `analysis`
+and `full analysis` defined, typing "full analysis" expands the longer one. If
+the macro has variables, the palette opens on its fill-in step and the
+replacement happens once you submit.
+
+This needs a real key combination — a bare `Tab` cannot be used, because a
+global shortcut swallows that key in *every* application.
+
+### The palette
+
 | Key | Does |
 | --- | --- |
 | `⌘⇧Space` | Open the palette over the current app (configurable) |
@@ -99,6 +128,7 @@ the change on next read. Diff it, commit it, sync it however you like.
   "version": 1,
   "settings": {
     "hotkey": "CmdOrCtrl+Shift+Space",
+    "expandHotkey": "Alt+Space", // expand the trigger at the caret
     "pasteMode": "paste",        // or "copy" to never paste directly
     "restoreClipboard": true
   },
@@ -118,9 +148,10 @@ the change on next read. Diff it, commit it, sync it however you like.
 ## Accessibility permission
 
 macOS has no supported way to inject text into another app, so pasting works by
-putting the expansion on the clipboard and synthesizing `⌘V`. That needs
-**Accessibility** permission, and without it the keystroke is silently swallowed
-— the palette opens, and nothing arrives.
+putting the expansion on the clipboard and synthesizing `⌘V`. Expanding in place
+additionally selects and copies the words before your caret to find out what you
+typed. Both need **Accessibility** permission, and without it the keystrokes are
+silently swallowed — the palette opens, and nothing arrives.
 
 The editor shows a banner with a button that jumps straight to
 System Settings → Privacy & Security → Accessibility when the permission is
@@ -140,8 +171,10 @@ bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/b
 
 - `assets/icon.svg`, `assets/tray.svg` — icon sources (see below)
 - `src-tauri/src/store.rs` — the JSON library, its schema, and the seed macros
-- `src-tauri/src/paste.rs` — clipboard + synthesized keystroke, and the permission check
-- `src-tauri/src/lib.rs` — windows, tray, global hotkey, file watcher, IPC commands
+- `src-tauri/src/paste.rs` — clipboard + synthesized keystrokes, and the permission check
+- `src-tauri/src/expand.rs` — which trigger the typed words name (`cargo test`)
+- `src-tauri/src/focus.rs` — remembering who had focus, and pasteboard change detection
+- `src-tauri/src/lib.rs` — windows, tray, global hotkeys, file watcher, IPC commands
 - `src/lib/template.ts` — the template language (variables, includes, built-ins)
 - `src/lib/fuzzy.ts` — the palette's ranking
 - `src/Palette.tsx`, `src/Editor.tsx` — the two windows, routed by window label

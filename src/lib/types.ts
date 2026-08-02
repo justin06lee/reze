@@ -12,7 +12,10 @@ export type Macro = {
 export type PasteMode = "paste" | "copy";
 
 export type Settings = {
+  /** Opens the search palette. */
   hotkey: string;
+  /** Expands the trigger already typed at the caret, with no window. */
+  expandHotkey: string;
   pasteMode: PasteMode;
   restoreClipboard: boolean;
 };

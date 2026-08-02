@@ -31,12 +31,19 @@ export default function Palette() {
   const [values, setValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
+  // Set when an in-place expansion is in flight: the characters either side of
+  // the trigger that Rust selected, which must be put back around the
+  // expansion. A ref rather than state because `choose` reads it in the same
+  // tick it is set.
+  const affixRef = useRef<{ head: string; tail: string } | null>(null);
+
   const rootRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const firstFieldRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
   const reset = useCallback(() => {
+    affixRef.current = null;
     setQuery("");
     setSelected(0);
     setStage("search");
@@ -101,7 +108,11 @@ export default function Palette() {
   const current = results[selected]?.macro ?? null;
 
   const send = useCallback(
-    async (text: string, copyOnly: boolean, macroId?: string) => {
+    async (body: string, copyOnly: boolean, macroId?: string) => {
+      // An in-place expansion replaces a whole selection, so the text either
+      // side of the trigger goes back exactly as it was.
+      const affix = affixRef.current;
+      const text = affix ? affix.head + body + affix.tail : body;
       try {
         // "Copy only" is either an explicit ⌘↵ or the global preference.
         await api.deliver(text, copyOnly || library?.settings.pasteMode === "copy");
@@ -162,6 +173,9 @@ export default function Palette() {
     if (e.key === "Escape") {
       e.preventDefault();
       if (stage === "fill") {
+        // Backing out of an in-place expansion abandons it — the caret is
+        // already back in the other app.
+        affixRef.current = null;
         setStage("search");
         setActive(null);
         requestAnimationFrame(() => searchRef.current?.focus());
@@ -194,6 +208,38 @@ export default function Palette() {
       choose(current, e.metaKey || e.ctrlKey);
     }
   };
+
+  // Expand-in-place: Rust has already selected the trigger words in the other
+  // app and matched a macro; the template engine lives here, so it finishes the
+  // job. The window stays hidden unless values still need filling in.
+  useEffect(() => {
+    const selected = listen<{ id: string; head: string; tail: string }>(
+      "expand-selected",
+      async (e) => {
+        const macro = macros.find((m) => m.id === e.payload.id);
+        if (!macro) return;
+        affixRef.current = { head: e.payload.head, tail: e.payload.tail };
+        const { text } = expandIncludes(macro.body, macros);
+        if (collectVariables(text).length > 0) await api.showPalette().catch(() => {});
+        await choose(macro, false);
+      },
+    );
+
+    const failed = listen<string>("expand-failed", (e) => {
+      // "no macro matched" is an ordinary miss and stays quiet. A missing
+      // permission is not — nothing will ever work until it is granted.
+      if (e.payload !== "accessibility-denied") return;
+      setError(
+        "Accessibility permission is missing — macOS grants it per build, so a new version needs it again. Open the editor to fix.",
+      );
+      api.showPalette().catch(() => {});
+    });
+
+    return () => {
+      selected.then((un) => un());
+      failed.then((un) => un());
+    };
+  }, [macros, choose]);
 
   const preview = useMemo(() => {
     if (stage === "fill") return render(expanded, values);

@@ -84,25 +84,72 @@ pub fn paste(
     Ok(())
 }
 
-/// Main thread only — see [`paste`].
-fn send_paste_keystroke() -> Result<(), String> {
-    use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+/// The key combinations we synthesize. Named rather than exposing `enigo::Key`
+/// so the rest of the app never has to reason about keycodes.
+#[derive(Clone, Copy)]
+pub enum Chord {
+    /// Extend the selection one word to the left.
+    ExtendWordLeft,
+    /// Drop the selection, leaving the caret at its right-hand end.
+    CollapseRight,
+    Copy,
+    Paste,
+}
 
-    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+/// Send `chord` `times` times. **Main thread only** — see [`paste`].
+pub fn send(chord: Chord, times: usize) -> Result<(), String> {
+    use enigo::Key;
 
     #[cfg(target_os = "macos")]
-    let modifier = Key::Meta;
+    let command = Key::Meta;
     #[cfg(not(target_os = "macos"))]
-    let modifier = Key::Control;
+    let command = Key::Control;
 
-    enigo
-        .key(modifier, Direction::Press)
-        .map_err(|e| e.to_string())?;
-    let result = enigo.key(Key::Unicode('v'), Direction::Click);
-    // Release the modifier even if the keypress failed — a stuck Cmd key would
-    // leave the user's machine in a genuinely broken state.
-    let release = enigo.key(modifier, Direction::Release);
-    result.map_err(|e| e.to_string())?;
-    release.map_err(|e| e.to_string())?;
-    Ok(())
+    // Option+Arrow is the by-word motion on macOS; Control+Arrow elsewhere.
+    #[cfg(target_os = "macos")]
+    let word = Key::Alt;
+    #[cfg(not(target_os = "macos"))]
+    let word = Key::Control;
+
+    let (modifiers, key): (&[Key], Key) = match chord {
+        Chord::ExtendWordLeft => (&[Key::Shift, word], Key::LeftArrow),
+        Chord::CollapseRight => (&[], Key::RightArrow),
+        Chord::Copy => (&[command], Key::Unicode('c')),
+        Chord::Paste => (&[command], Key::Unicode('v')),
+    };
+    tap(modifiers, key, times)
+}
+
+fn tap(modifiers: &[enigo::Key], key: enigo::Key, times: usize) -> Result<(), String> {
+    use enigo::{Direction, Enigo, Keyboard, Settings};
+
+    if times == 0 {
+        return Ok(());
+    }
+    let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
+
+    for m in modifiers {
+        enigo.key(*m, Direction::Press).map_err(|e| e.to_string())?;
+    }
+
+    let mut result = Ok(());
+    for _ in 0..times {
+        if let Err(e) = enigo.key(key, Direction::Click) {
+            result = Err(e.to_string());
+            break;
+        }
+    }
+
+    // Release unconditionally and in reverse order. A modifier left stuck down
+    // would break every subsequent keystroke on the machine, which is a far
+    // worse outcome than a failed paste.
+    for m in modifiers.iter().rev() {
+        let _ = enigo.key(*m, Direction::Release);
+    }
+    result
+}
+
+/// Main thread only — see [`paste`].
+fn send_paste_keystroke() -> Result<(), String> {
+    send(Chord::Paste, 1)
 }
