@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as api from "./lib/api";
 import { accelerator, isModifierOnly, prettyHotkey } from "./lib/hotkey";
 import { BUILTINS, collectVariables, expandIncludes } from "./lib/template";
@@ -108,9 +109,18 @@ export default function Editor() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "n") {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.key === "n") {
         e.preventDefault();
         addMacro();
+      } else if (e.key === "q") {
+        // No application menu on a menu-bar app, so ⌘Q would otherwise do
+        // nothing at all from here.
+        e.preventDefault();
+        api.quit();
+      } else if (e.key === "w") {
+        e.preventDefault();
+        getCurrentWindow().hide();
       }
     };
     window.addEventListener("keydown", onKey);

@@ -117,7 +117,13 @@ global shortcut swallows that key in *every* application.
 | `esc` | Back out of fill-in, or close |
 
 The tray icon opens the macro editor, where you can add, edit, tag, duplicate
-and delete macros, rebind the hotkey, and change how expansions are delivered.
+and delete macros, rebind the hotkeys, and change how expansions are delivered.
+
+### Quitting
+
+Use **Quit Reze** in the tray menu, or `⌘Q` with the editor focused. A menu-bar
+app has no application menu, so `⌘Q` has nothing to hang off by default — the
+editor window handles it itself. `⌘W` there closes the window without quitting.
 
 ## Template syntax
 

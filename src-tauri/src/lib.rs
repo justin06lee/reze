@@ -177,6 +177,13 @@ fn open_editor(app: AppHandle) {
     show_editor(&app);
 }
 
+/// Quit for real. A menu-bar app has no application menu, so the usual ⌘Q has
+/// nothing to hang off — the windows provide it themselves.
+#[tauri::command]
+fn quit(app: AppHandle) {
+    app.exit(0);
+}
+
 #[tauri::command]
 fn resize_palette(app: AppHandle, height: f64) {
     if let Some(win) = app.get_webview_window(PALETTE) {
@@ -562,6 +569,7 @@ pub fn run() {
             hide_palette,
             show_palette,
             open_editor,
+            quit,
             resize_palette,
             set_hotkeys,
             library_path,
@@ -595,7 +603,8 @@ pub fn run() {
             let open_item = MenuItem::with_id(app, "open", "Macro Editor…", true, None::<&str>)?;
             let palette_item =
                 MenuItem::with_id(app, "palette", "Show Palette", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "Quit Reze", true, None::<&str>)?;
+            let quit_item =
+                MenuItem::with_id(app, "quit", "Quit Reze", true, Some("CmdOrCtrl+Q"))?;
             let sep = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(app, &[&palette_item, &open_item, &sep, &quit_item])?;
 
@@ -652,8 +661,14 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building reze")
         .run(|_app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                api.prevent_exit();
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                // A menu-bar app must survive its last window closing, which is
+                // what this guard is for. But `code` is Some only when the exit
+                // was asked for programmatically — i.e. the Quit menu item —
+                // and refusing that made Quit do nothing at all.
+                if code.is_none() {
+                    api.prevent_exit();
+                }
             }
         });
 }

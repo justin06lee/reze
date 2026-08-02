@@ -19,6 +19,7 @@ export const hidePalette = () => invoke<void>("hide_palette");
 /** Show without resetting — used when an in-place expansion needs values. */
 export const showPalette = () => invoke<void>("show_palette");
 export const openEditor = () => invoke<void>("open_editor");
+export const quit = () => invoke<void>("quit");
 export const resizePalette = (height: number) => invoke<void>("resize_palette", { height });
 export const setHotkeys = (palette: string, expand: string) =>
   invoke<void>("set_hotkeys", { palette, expand });
