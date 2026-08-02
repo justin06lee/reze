@@ -1,0 +1,49 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The palette window is transparent — anything opaque here would show up as a
+   rectangle behind the rounded blur layer. */
+html[data-window="palette"],
+html[data-window="palette"] body,
+html[data-window="palette"] #root {
+  background: transparent;
+  height: auto;
+}
+
+html[data-window="editor"] {
+  background: #17171a;
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-window="editor"] {
+    background: #f6f6f7;
+  }
+}
+
+/* Selecting UI chrome by dragging is never what the user meant. */
+button,
+kbd,
+summary,
+label > span {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea {
+  font-family: inherit;
+}
