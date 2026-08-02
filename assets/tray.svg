@@ -1,0 +1,36 @@
+<!--
+  Reze menu-bar glyph — original artwork.
+
+  A macOS *template* image: pure black plus alpha, nothing else. The system
+  ignores the colour and tints the alpha channel itself, so this comes out
+  white on a dark menu bar and black on a light one automatically. Drawing it
+  white here would break that.
+
+  tray-icon normalises menu-bar images to 18pt tall preserving aspect, so this
+  is authored square at 72px (4x) and the artwork fills ~60 of those 72 units.
+  Every stroke is kept fat relative to the canvas so it survives the downscale.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">
+  <defs>
+    <!-- The grin is punched out rather than painted, so it stays transparent
+         and the system tint shows through correctly in both appearances. -->
+    <mask id="grin">
+      <rect width="72" height="72" fill="#fff" />
+      <path
+        d="M21.5 41 L25.4 46.6 L29.2 41 L33 46.6 L36.8 41 L40.6 46.6 L44.5 41
+           Q43.6 52 33 53.8 Q22.4 52 21.5 41 Z"
+        fill="#000" />
+    </mask>
+  </defs>
+
+  <g transform="translate(-1 -1.5)" fill="#000">
+    <g mask="url(#grin)">
+      <circle cx="33" cy="45" r="22" />
+    </g>
+    <g transform="rotate(-12 33 26)">
+      <rect x="28" y="15" width="11" height="13" rx="2.5" />
+      <rect x="37.5" y="18.5" width="16" height="2.8" rx="1.4" />
+      <circle cx="57" cy="19.9" r="6.5" fill="none" stroke="#000" stroke-width="2.8" />
+    </g>
+  </g>
+</svg>
