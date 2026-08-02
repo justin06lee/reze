@@ -292,7 +292,7 @@ function SettingsPane({
   library: Library;
   update: (next: Library) => void;
 }) {
-  const [recording, setRecording] = useState(false);
+  const [recording, setRecording] = useState<"hotkey" | "expandHotkey" | null>(null);
   const [path, setPath] = useState("");
   const [hotkeyError, setHotkeyError] = useState<string | null>(null);
 
@@ -310,12 +310,15 @@ function SettingsPane({
         setHotkeyError("Include at least one modifier (⌘, ⌥, ⌃ or ⇧).");
         return;
       }
-      setRecording(false);
+      const next = { ...library.settings, [recording]: accel };
+      setRecording(null);
+      // Register before saving: if the combination is already taken by another
+      // app, the old one keeps working and nothing is written.
       api
-        .setHotkey(accel)
+        .setHotkeys(next.hotkey, next.expandHotkey)
         .then(() => {
           setHotkeyError(null);
-          update({ ...library, settings: { ...library.settings, hotkey: accel } });
+          update({ ...library, settings: next });
         })
         .catch((err) => setHotkeyError(String(err)));
     };
@@ -325,18 +328,41 @@ function SettingsPane({
 
   const s = library.settings;
 
+  const recorder = (slot: "hotkey" | "expandHotkey") => (
+    <div className="e-row">
+      <button
+        className="e-hotkey"
+        data-recording={recording === slot}
+        onClick={() => setRecording(slot)}
+      >
+        {recording === slot ? "Press a combination…" : prettyHotkey(s[slot])}
+      </button>
+      <code>{s[slot]}</code>
+    </div>
+  );
+
   return (
     <div className="e-settings">
       <section>
-        <h2>Hotkey</h2>
-        <p>Opens the palette over whatever app you are in.</p>
-        <div className="e-row">
-          <button className="e-hotkey" data-recording={recording} onClick={() => setRecording(true)}>
-            {recording ? "Press a combination…" : prettyHotkey(s.hotkey)}
-          </button>
-          <code>{s.hotkey}</code>
-        </div>
+        <h2>Palette hotkey</h2>
+        <p>Opens the search palette over whatever app you are in.</p>
+        {recorder("hotkey")}
+      </section>
+
+      <section>
+        <h2>Expand in place</h2>
+        <p>
+          Type a trigger like <code>full analysis</code> straight into any app, then press this.
+          Reze reads back the words before your cursor, and if they name a macro it replaces
+          them with the expansion — no window, no search. Nothing happens if they do not match
+          anything, and your text is left as it was.
+        </p>
+        {recorder("expandHotkey")}
         {hotkeyError && <p className="e-warn">{hotkeyError}</p>}
+        <p className="e-note">
+          A plain key like Tab cannot be used: a global shortcut swallows that key in every
+          application, so it needs at least one modifier.
+        </p>
       </section>
 
       <section>

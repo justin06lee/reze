@@ -30,15 +30,24 @@ pub struct Macro {
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub hotkey: String,
+    /// Expands the trigger already typed at the caret, without showing a window.
+    /// Defaulted so libraries written before this existed still load.
+    #[serde(default = "default_expand_hotkey")]
+    pub expand_hotkey: String,
     /// "paste" simulates Cmd+V into the previous app; "copy" only fills the clipboard.
     pub paste_mode: String,
     pub restore_clipboard: bool,
+}
+
+fn default_expand_hotkey() -> String {
+    "Alt+Space".into()
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             hotkey: "CmdOrCtrl+Shift+Space".into(),
+            expand_hotkey: default_expand_hotkey(),
             paste_mode: "paste".into(),
             restore_clipboard: true,
         }
@@ -84,12 +93,16 @@ pub fn library_path() -> PathBuf {
 /// saves apart from a real external edit (otherwise every save round-trips).
 pub struct AppState {
     pub last_written: Mutex<String>,
+    /// PID of whatever was frontmost when the palette opened, so focus can be
+    /// handed back deliberately rather than hoped for.
+    pub previous_app: Mutex<Option<i32>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
             last_written: Mutex::new(String::new()),
+            previous_app: Mutex::new(None),
         }
     }
 }

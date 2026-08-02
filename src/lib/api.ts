@@ -16,8 +16,11 @@ export const deliver = (text: string, copyOnly: boolean) =>
   invoke<void>("deliver", { text, copyOnly });
 
 export const hidePalette = () => invoke<void>("hide_palette");
+/** Show without resetting — used when an in-place expansion needs values. */
+export const showPalette = () => invoke<void>("show_palette");
 export const openEditor = () => invoke<void>("open_editor");
 export const resizePalette = (height: number) => invoke<void>("resize_palette", { height });
-export const setHotkey = (hotkey: string) => invoke<void>("set_hotkey", { hotkey });
+export const setHotkeys = (palette: string, expand: string) =>
+  invoke<void>("set_hotkeys", { palette, expand });
 export const libraryPath = () => invoke<string>("library_path");
 export const revealLibrary = () => invoke<void>("reveal_library");

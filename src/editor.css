@@ -467,6 +467,20 @@
   font-size: 12px;
 }
 
+.e-note {
+  margin-top: 10px !important;
+  font-size: 11.5px !important;
+  color: var(--fg-faint) !important;
+}
+
+.e-settings p code {
+  font: 11.5px ui-monospace, "SF Mono", Menlo, monospace;
+  background: var(--bg-input);
+  border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--fg);
+}
+
 .e-check {
   display: flex;
   align-items: flex-start;
