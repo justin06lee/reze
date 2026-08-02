@@ -83,6 +83,14 @@ fn open_accessibility_settings() {
 /// Hide the palette, then deliver `text` to whatever app regained focus.
 #[tauri::command]
 async fn deliver(app: AppHandle, text: String, copy_only: bool) -> Result<(), String> {
+    // Checked before hiding, not inside the worker: an error raised after the
+    // window is gone is an error the user never sees. Missing Accessibility is
+    // the single most likely failure — and it silently recurs after every
+    // update, since a rebuilt binary is a new app as far as macOS is concerned.
+    if !copy_only && !paste::has_accessibility() {
+        return Err("accessibility-denied".into());
+    }
+
     if let Some(win) = app.get_webview_window(PALETTE) {
         let _ = win.hide();
     }
@@ -90,15 +98,41 @@ async fn deliver(app: AppHandle, text: String, copy_only: bool) -> Result<(), St
         .map(|l| l.settings.restore_clipboard)
         .unwrap_or(true);
 
-    tauri::async_runtime::spawn_blocking(move || {
+    let worker = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         if copy_only {
             paste::write_clipboard(&text)
         } else {
-            paste::paste(&text, restore)
+            paste::paste(&text, restore, |f| run_on_main_thread(&worker, f))
         }
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    // Anything that fails after the hide would otherwise vanish with the
+    // window, so bring it back to carry the message.
+    if result.is_err() {
+        if let Some(win) = app.get_webview_window(PALETTE) {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+    }
+    result
+}
+
+/// Run `f` on the main thread and wait for its result.
+///
+/// The timeout is a backstop only: if the event loop were ever wedged, a
+/// missing paste is a far better outcome than a worker thread parked forever.
+fn run_on_main_thread(app: &AppHandle, f: fn() -> Result<(), String>) -> Result<(), String> {
+    let (tx, rx) = channel();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(f());
+    })
+    .map_err(|e| format!("could not reach the main thread: {e}"))?;
+
+    rx.recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "timed out waiting for the paste keystroke".to_string())?
 }
 
 #[tauri::command]

@@ -109,10 +109,11 @@ export default function Palette() {
         reset();
       } catch (e) {
         // The one failure worth explaining in place: without Accessibility the
-        // keystroke is swallowed by the OS and nothing at all happens.
+        // keystroke is swallowed by the OS and nothing at all happens. It also
+        // has to be re-granted after every update, which is otherwise baffling.
         setError(
           String(e) === "accessibility-denied"
-            ? "Reze needs Accessibility permission to paste. Open the editor to grant it."
+            ? "Accessibility permission is missing — macOS grants it per build, so a new version needs it again. Open the editor to fix. ⌘↵ still copies."
             : String(e),
         );
       }

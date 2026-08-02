@@ -47,7 +47,19 @@ pub fn write_clipboard(text: &str) -> Result<(), String> {
 /// The caller is responsible for having already hidden our window — macOS
 /// restores focus to the previous app on hide, and the paste lands wherever
 /// focus ended up.
-pub fn paste(text: &str, restore_clipboard: bool) -> Result<(), String> {
+///
+/// `run_on_main` must execute the given function on the main thread and block
+/// until it finishes. Synthesizing the keystroke has to happen there: mapping
+/// a character to a layout-specific keycode goes through the Text Services
+/// Manager, which calls `dispatch_assert_queue(main)` internally and raises
+/// SIGTRAP — an uncatchable hard crash, not an `Err` — anywhere else. The
+/// clipboard work and the sleeps deliberately stay off the main thread so the
+/// UI is never blocked for the half second this takes.
+pub fn paste(
+    text: &str,
+    restore_clipboard: bool,
+    run_on_main: impl FnOnce(fn() -> Result<(), String>) -> Result<(), String>,
+) -> Result<(), String> {
     if !has_accessibility() {
         return Err("accessibility-denied".into());
     }
@@ -62,7 +74,7 @@ pub fn paste(text: &str, restore_clipboard: bool) -> Result<(), String> {
     // Let the clipboard server and the focus change settle before the keystroke.
     std::thread::sleep(Duration::from_millis(120));
 
-    send_paste_keystroke()?;
+    run_on_main(send_paste_keystroke)?;
 
     if let Some(prev) = previous {
         // Long enough that the target app has read the pasteboard already.
@@ -72,6 +84,7 @@ pub fn paste(text: &str, restore_clipboard: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Main thread only — see [`paste`].
 fn send_paste_keystroke() -> Result<(), String> {
     use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 

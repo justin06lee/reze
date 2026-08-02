@@ -37,9 +37,14 @@ glyph up top. Press `⌘⇧Space` to confirm it is alive.
 
 Two things to know on first run:
 
-- **Grant Accessibility again.** The permission is per-binary, so the installed
-  `Reze.app` is a separate entry from any dev build you already approved. Open
-  the editor from the tray and use the banner.
+- **Grant Accessibility again — every time you update.** macOS ties the
+  permission to the exact binary, so a dev build, the installed app, and every
+  rebuilt version of it are all separate entries. After replacing
+  `/Applications/Reze.app` the old grant no longer applies, and macOS does not
+  say so: the entry may even still look ticked in System Settings while being
+  inert. Untick and re-tick it, or remove the row with **−** and re-add.
+  The palette will tell you when this has happened, and `⌘↵` still copies to the
+  clipboard meanwhile.
 - **It is ad-hoc signed, not notarized.** Building and running it on your own
   machine is fine — locally built apps never get the quarantine flag. If you
   copy the `.dmg` to another Mac it *will* be flagged, and Gatekeeper will
