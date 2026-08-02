@@ -2,6 +2,7 @@ mod expand;
 mod focus;
 mod paste;
 mod store;
+mod typed;
 
 use std::str::FromStr;
 use std::sync::mpsc::channel;
@@ -236,12 +237,22 @@ fn library_path() -> String {
 #[tauri::command]
 fn reveal_library() {
     #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .arg("-R")
-            .arg(store::library_path())
-            .spawn();
-    }
+    let _ = std::process::Command::new("open")
+        .arg("-R")
+        .arg(store::library_path())
+        .spawn();
+
+    // No portable "reveal this file" exists, so open the folder containing it.
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open")
+        .arg(store::config_dir())
+        .spawn();
+
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer")
+        .arg("/select,")
+        .arg(store::library_path())
+        .spawn();
 }
 
 // ---------------------------------------------------------------- windows
@@ -338,12 +349,58 @@ fn run_expand(app: &AppHandle) -> Result<(), String> {
     if names.is_empty() {
         return Ok(());
     }
+
+    // The keystroke tap cannot be created without Accessibility, so permission
+    // granted after launch leaves it uninstalled. Retry here instead of making
+    // the user restart — this attempt still falls back to selection, but the
+    // next one will not.
+    if library.settings.track_typing && !typed::is_running() {
+        let _ = on_main(app, typed::start);
+    }
+
+    // Preferred strategy: replace what we watched being typed. This is the only
+    // one that works in a terminal or any TUI, where the line being edited
+    // cannot be selected or copied at all.
+    if library.settings.track_typing && typed::is_running() {
+        let buffer = typed::snapshot();
+        if let Some((index, start, end)) = expand::match_trigger(&buffer, &names) {
+            // Everything from the trigger to the caret goes; whatever the user
+            // typed after it comes back on the other side of the expansion.
+            let doomed = buffer[start..].chars().count();
+            on_main(app, move || paste::send(paste::Chord::Backspace, doomed))
+                .and_then(|inner| inner)?;
+            typed::drop_last(doomed);
+
+            return app
+                .emit_to(
+                    PALETTE,
+                    "expand-selected",
+                    Expansion {
+                        id: library.macros[index].id.clone(),
+                        head: String::new(),
+                        tail: buffer[end..].to_string(),
+                    },
+                )
+                .map_err(|e| e.to_string());
+        }
+    }
+
+    // Fallback: select the words in front of the caret and read them back.
+    // Needed when the buffer is cold — text typed before Reze started, or
+    // pasted in rather than typed.
     let span = expand::words_to_select(&names);
 
     // Borrow the clipboard to read the text back, then hand it straight back to
     // the user before anything else can go wrong.
     let saved = paste::read_clipboard().unwrap_or_default();
     let before = focus::pasteboard_change_count();
+
+    // Where there is no change counter, leave a value on the clipboard that
+    // nothing else could produce; finding it still there proves the copy did
+    // not happen.
+    if before.is_none() {
+        let _ = paste::write_clipboard(paste::SENTINEL);
+    }
 
     on_main(app, move || -> Result<(), String> {
         paste::send(paste::Chord::ExtendWordLeft, span)?;
@@ -357,9 +414,20 @@ fn run_expand(app: &AppHandle) -> Result<(), String> {
     let mut selection = None;
     for _ in 0..25 {
         std::thread::sleep(Duration::from_millis(20));
-        if focus::pasteboard_change_count() != before {
-            selection = paste::read_clipboard().ok();
-            break;
+        match before {
+            Some(count) => {
+                if focus::pasteboard_change_count() != Some(count) {
+                    selection = paste::read_clipboard().ok();
+                    break;
+                }
+            }
+            None => {
+                let current = paste::read_clipboard().unwrap_or_default();
+                if current != paste::SENTINEL {
+                    selection = Some(current);
+                    break;
+                }
+            }
         }
     }
 
@@ -515,6 +583,15 @@ pub fn run() {
                 eprintln!("reze: {e}");
             }
 
+            // Attaches to this thread's run loop, so it has to happen here on
+            // the main thread. Failure is not fatal: expansion falls back to
+            // selecting and copying the text in front of the caret.
+            if lib.settings.track_typing {
+                if let Err(e) = typed::start() {
+                    eprintln!("reze: typing not tracked ({e}); using selection fallback");
+                }
+            }
+
             let open_item = MenuItem::with_id(app, "open", "Macro Editor…", true, None::<&str>)?;
             let palette_item =
                 MenuItem::with_id(app, "palette", "Show Palette", true, None::<&str>)?;
@@ -522,15 +599,17 @@ pub fn run() {
             let sep = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(app, &[&palette_item, &open_item, &sep, &quit_item])?;
 
-            // A dedicated monochrome template glyph — the full-colour app icon
-            // would look wrong in the menu bar and would not tint with the
-            // system appearance. Embedded rather than bundled as a resource so
-            // it cannot go missing at runtime.
+            // macOS gets a monochrome template glyph, which the system tints to
+            // match the menu bar. Nothing else has template images, so a black
+            // glyph would vanish into a dark panel — those get the colour icon.
+            #[cfg(target_os = "macos")]
             let tray_icon = Image::from_bytes(include_bytes!("../icons/tray.png"))?;
+            #[cfg(not(target_os = "macos"))]
+            let tray_icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
 
             TrayIconBuilder::new()
                 .icon(tray_icon)
-                .icon_as_template(true)
+                .icon_as_template(cfg!(target_os = "macos"))
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id().as_ref() {

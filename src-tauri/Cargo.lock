@@ -2983,8 +2983,12 @@ name = "reze"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "core-foundation",
+ "core-graphics",
  "dirs",
  "enigo",
+ "foreign-types",
+ "libc",
  "macos-accessibility-client",
  "notify",
  "objc2",

@@ -384,6 +384,11 @@
   color: var(--danger) !important;
 }
 
+.e-danger[data-armed="true"] {
+  color: #fff !important;
+  background: var(--danger);
+}
+
 /* ---------------------------------------------------------------- settings */
 
 .e-settings {
@@ -524,4 +529,13 @@
   padding: 2px 6px;
   color: var(--fg);
   margin-right: 6px;
+}
+
+/* ------------------------------------------------- non-macOS fallback */
+
+/* The left inset exists solely to clear the macOS traffic lights, which overlay
+   the content. Other platforms draw their own decorations outside the client
+   area, so the gap would just be dead space. */
+html[data-platform="other"] .e-titlebar {
+  padding-left: 14px;
 }

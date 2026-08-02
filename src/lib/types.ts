@@ -16,6 +16,8 @@ export type Settings = {
   hotkey: string;
   /** Expands the trigger already typed at the caret, with no window. */
   expandHotkey: string;
+  /** Watch typing so expand-in-place works in terminals and TUIs. */
+  trackTyping: boolean;
   pasteMode: PasteMode;
   restoreClipboard: boolean;
 };

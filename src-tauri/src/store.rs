@@ -34,6 +34,10 @@ pub struct Settings {
     /// Defaulted so libraries written before this existed still load.
     #[serde(default = "default_expand_hotkey")]
     pub expand_hotkey: String,
+    /// Watch what is typed so in-place expansion works in terminals and TUIs,
+    /// where the text in front of the caret cannot be selected and read back.
+    #[serde(default = "default_true")]
+    pub track_typing: bool,
     /// "paste" simulates Cmd+V into the previous app; "copy" only fills the clipboard.
     pub paste_mode: String,
     pub restore_clipboard: bool,
@@ -43,11 +47,16 @@ fn default_expand_hotkey() -> String {
     "Alt+Space".into()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             hotkey: "CmdOrCtrl+Shift+Space".into(),
             expand_hotkey: default_expand_hotkey(),
+            track_typing: true,
             paste_mode: "paste".into(),
             restore_clipboard: true,
         }

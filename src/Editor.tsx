@@ -15,8 +15,10 @@ export default function Editor() {
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [showSettings, setShowSettings] = useState(false);
   const [trusted, setTrusted] = useState(true);
+  const [armedDelete, setArmedDelete] = useState<string | null>(null);
 
   const saveTimer = useRef<number | null>(null);
+  const armTimer = useRef<number | null>(null);
 
   const macros = library?.macros ?? [];
   const selected = macros.find((m) => m.id === selectedId) ?? null;
@@ -24,6 +26,9 @@ export default function Editor() {
   useEffect(() => {
     if (!selectedId && macros.length > 0) setSelectedId(macros[0].id);
   }, [macros, selectedId]);
+
+  // Never leave a delete armed on a macro the user has navigated away from.
+  useEffect(() => setArmedDelete(null), [selectedId]);
 
   // Permission can be granted while the app is running, so re-check whenever
   // the user comes back to this window rather than only at startup.
@@ -81,14 +86,24 @@ export default function Editor() {
     [library, update],
   );
 
+  // Two-step rather than window.confirm(): wry ships no WKUIDelegate, so a
+  // webview confirm() never shows a panel and silently returns false — which
+  // made the delete button do nothing at all.
   const deleteMacro = useCallback(
     (m: Macro) => {
       if (!library) return;
-      if (!confirm(`Delete "${m.name}"?`)) return;
+      if (armedDelete !== m.id) {
+        setArmedDelete(m.id);
+        if (armTimer.current) clearTimeout(armTimer.current);
+        armTimer.current = window.setTimeout(() => setArmedDelete(null), 3000);
+        return;
+      }
+      if (armTimer.current) clearTimeout(armTimer.current);
+      setArmedDelete(null);
       update({ ...library, macros: library.macros.filter((x) => x.id !== m.id) });
       setSelectedId(null);
     },
-    [library, update],
+    [library, update, armedDelete],
   );
 
   useEffect(() => {
@@ -269,8 +284,12 @@ export default function Editor() {
 
               <div className="e-actions">
                 <button onClick={() => duplicateMacro(selected)}>Duplicate</button>
-                <button className="e-danger" onClick={() => deleteMacro(selected)}>
-                  Delete
+                <button
+                  className="e-danger"
+                  data-armed={armedDelete === selected.id}
+                  onClick={() => deleteMacro(selected)}
+                >
+                  {armedDelete === selected.id ? "Click again to delete" : "Delete"}
                 </button>
               </div>
             </section>
@@ -363,6 +382,29 @@ function SettingsPane({
           A plain key like Tab cannot be used: a global shortcut swallows that key in every
           application, so it needs at least one modifier.
         </p>
+
+        <label className="e-check" style={{ marginTop: 16 }}>
+          <input
+            type="checkbox"
+            checked={s.trackTyping}
+            onChange={(e) =>
+              update({ ...library, settings: { ...s, trackTyping: e.target.checked } })
+            }
+          />
+          <span>
+            Watch typing so this works in terminals
+            <em>
+              Terminals and TUIs do not let anything select or copy the line you are editing, so
+              the only way to know what you typed is to have watched you type it. Reze keeps the
+              last 160 characters in memory — never written to disk, never sent anywhere — and
+              discards them on Enter, Tab, Escape, any arrow key, any click, any shortcut, and
+              whenever you switch apps. macOS blocks this outright while a password field is
+              focused. Turn it off and expansion falls back to selecting the words at your
+              caret, which works in normal text fields but not in a terminal.
+            </em>
+          </span>
+        </label>
+        <p className="e-note">Takes effect next time Reze starts.</p>
       </section>
 
       <section>

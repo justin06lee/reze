@@ -1,6 +1,14 @@
 # Reze
 
-A macOS menu-bar app that turns short triggers into full prompts.
+A menu-bar app that turns short triggers into full prompts.
+
+Built for macOS. It also builds and runs on Linux under X11, with the
+macOS-specific pieces degrading rather than breaking: the palette paints its own
+surface instead of using the native blur, the tray gets the colour icon instead
+of a template glyph, and expansion uses the selection fallback because the
+keystroke tap is macOS-only. **Wayland is not supported** — it blocks synthetic
+input into other applications by design, which is the mechanism this whole app
+rests on.
 
 Hit a global hotkey anywhere, type `full analysis`, press Enter — the paragraph
 you actually meant gets pasted into whatever app you were already in.
@@ -75,10 +83,20 @@ Please do a full analysis|          ← your caret, in any app
 Please do a Be rigorous and concrete. Cite every claim with…
 ```
 
-Reze reads back the words before your caret, and if they name a macro it swaps
-them for the expansion. No window appears, and the rest of the line is put back
-exactly as it was — the space in front, whatever followed the caret, all of it.
-If the words match nothing, nothing happens and your text is left alone.
+Reze replaces the trigger with the expansion. No window appears, and the rest of
+the line is left exactly as it was. If the words match nothing, nothing happens
+and your text is untouched.
+
+It works this out in one of two ways:
+
+1. **What it saw you type.** Reze keeps the last 160 characters you typed and
+   backspaces over the trigger. This is the only approach that works in a
+   terminal or any TUI — `Option+←` there is an escape sequence to the shell,
+   not a selection, and `⌘C` copies the terminal's view selection rather than
+   the line you are editing. See [Typing awareness](#typing-awareness).
+2. **Selecting and reading back the words at your caret.** Used when the first
+   has nothing to offer — text typed before Reze started, or pasted rather than
+   typed. Works in ordinary text fields, not in terminals.
 
 Matching ignores case and prefers the longest trigger, so with both `analysis`
 and `full analysis` defined, typing "full analysis" expands the longer one. If
@@ -129,6 +147,7 @@ the change on next read. Diff it, commit it, sync it however you like.
   "settings": {
     "hotkey": "CmdOrCtrl+Shift+Space",
     "expandHotkey": "Alt+Space", // expand the trigger at the caret
+    "trackTyping": true,         // needed for expansion inside terminals
     "pasteMode": "paste",        // or "copy" to never paste directly
     "restoreClipboard": true
   },
@@ -144,6 +163,27 @@ the change on next read. Diff it, commit it, sync it however you like.
   ]
 }
 ```
+
+## Typing awareness
+
+Expanding in a terminal requires knowing what you typed, and nothing can be
+read back out of a terminal's line editor. So Reze watches typing instead:
+
+- It keeps the **last 160 characters**, in memory only. Never written to disk,
+  never sent anywhere.
+- It is discarded on Enter, Tab, Escape, any arrow or navigation key, any mouse
+  click, any keypress with a modifier held, and whenever you switch apps.
+- macOS disables event taps entirely while **secure input** is active, so
+  password fields are never observed — not by policy, but by the OS.
+- Turn it off with `trackTyping` in Settings. Expansion then falls back to
+  selecting the words at your caret, which works in normal text fields but not
+  in a terminal.
+
+Only implemented on macOS. Elsewhere the selection fallback is always used.
+
+The tap needs Accessibility permission to exist at all, so granting it *after*
+launch leaves it uninstalled. Reze retries on the next expansion rather than
+making you restart — that one attempt still falls back to selection.
 
 ## Accessibility permission
 
@@ -173,6 +213,7 @@ bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/b
 - `src-tauri/src/store.rs` — the JSON library, its schema, and the seed macros
 - `src-tauri/src/paste.rs` — clipboard + synthesized keystrokes, and the permission check
 - `src-tauri/src/expand.rs` — which trigger the typed words name (`cargo test`)
+- `src-tauri/src/typed.rs` — the keystroke tap behind terminal support
 - `src-tauri/src/focus.rs` — remembering who had focus, and pasteboard change detection
 - `src-tauri/src/lib.rs` — windows, tray, global hotkeys, file watcher, IPC commands
 - `src/lib/template.ts` — the template language (variables, includes, built-ins)
@@ -207,3 +248,14 @@ preserving aspect ratio, so the glyph is authored square at 72px (4× for
 Retina) with deliberately fat strokes that survive the downscale. It is
 embedded with `include_bytes!` rather than bundled as a resource, so it cannot
 go missing at runtime.
+
+## Building
+
+Always build with `bun run tauri build` and install the whole `.app`.
+
+Running `cargo build` and copying just the binary over an installed bundle
+looks like it works and does not: the frontend is embedded at compile time, and
+a partially-rebuilt binary can end up with an `index.html` that references an
+asset hash the embedded map no longer has. The window then loads, `#root` stays
+empty, and no error surfaces anywhere — the app simply does nothing. If you ever
+see that, `cargo clean -p reze` and build again properly.
