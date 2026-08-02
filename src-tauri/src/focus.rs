@@ -38,20 +38,25 @@ pub fn activate_pid(pid: i32) -> bool {
     }
 }
 
-/// Monotonic counter that macOS bumps on every pasteboard write.
+/// Monotonic counter that macOS bumps on every pasteboard write, or `None`
+/// where no such counter exists.
 ///
-/// Comparing it before and after a synthesized `Cmd+C` is the only honest way
-/// to tell "the user had nothing selected" from "the copy worked and happened
-/// to produce the same text" — reading the clipboard alone cannot distinguish
+/// Comparing it before and after a synthesized copy is the only honest way to
+/// tell "the user had nothing selected" from "the copy worked and happened to
+/// produce the same text" — reading the clipboard alone cannot distinguish
 /// them, and a stale read would match against whatever was copied hours ago.
-pub fn pasteboard_change_count() -> isize {
+///
+/// Callers that get `None` should fall back to [`crate::paste::write_sentinel`]:
+/// park a value on the clipboard that nothing else could produce, and treat it
+/// still being there as proof that nothing was copied.
+pub fn pasteboard_change_count() -> Option<isize> {
     #[cfg(target_os = "macos")]
     {
         use objc2_app_kit::NSPasteboard;
-        NSPasteboard::generalPasteboard().changeCount()
+        Some(NSPasteboard::generalPasteboard().changeCount())
     }
     #[cfg(not(target_os = "macos"))]
     {
-        0
+        None
     }
 }

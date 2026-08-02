@@ -9,6 +9,12 @@ import "./global.css";
 const label = getCurrentWindow().label;
 document.documentElement.dataset.window = label;
 
+// Several visual decisions are macOS-only — the blurred palette backdrop and
+// the gap for the traffic lights — so the stylesheet needs to know where it is.
+document.documentElement.dataset.platform = navigator.userAgent.includes("Mac")
+  ? "macos"
+  : "other";
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>{label === "editor" ? <Editor /> : <Palette />}</React.StrictMode>,
 );

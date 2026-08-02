@@ -42,6 +42,13 @@ pub fn write_clipboard(text: &str) -> Result<(), String> {
     cb.set_text(text.to_string()).map_err(|e| e.to_string())
 }
 
+/// A value nothing else would ever put on the clipboard.
+///
+/// Used where no pasteboard change counter is available: write this, send the
+/// copy, and if it is still there afterwards then nothing was selected. The
+/// caller restores the user's clipboard either way.
+pub const SENTINEL: &str = "\u{200b}reze-nothing-was-copied\u{200b}";
+
 /// Copy `text` to the clipboard and paste it into the frontmost app.
 ///
 /// The caller is responsible for having already hidden our window — macOS
@@ -92,6 +99,8 @@ pub enum Chord {
     ExtendWordLeft,
     /// Drop the selection, leaving the caret at its right-hand end.
     CollapseRight,
+    /// Delete one character to the left of the caret.
+    Backspace,
     Copy,
     Paste,
 }
@@ -114,6 +123,7 @@ pub fn send(chord: Chord, times: usize) -> Result<(), String> {
     let (modifiers, key): (&[Key], Key) = match chord {
         Chord::ExtendWordLeft => (&[Key::Shift, word], Key::LeftArrow),
         Chord::CollapseRight => (&[], Key::RightArrow),
+        Chord::Backspace => (&[], Key::Backspace),
         Chord::Copy => (&[command], Key::Unicode('c')),
         Chord::Paste => (&[command], Key::Unicode('v')),
     };
