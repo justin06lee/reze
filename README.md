@@ -265,3 +265,7 @@ a partially-rebuilt binary can end up with an `index.html` that references an
 asset hash the embedded map no longer has. The window then loads, `#root` stays
 empty, and no error surfaces anywhere — the app simply does nothing. If you ever
 see that, `cargo clean -p reze` and build again properly.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
