@@ -36,31 +36,34 @@ you actually meant gets pasted into whatever app you were already in.
 ## Install
 
 ```bash
-bun install
-bun run tauri build
+make
 ```
 
-That produces both bundles under `src-tauri/target/release/bundle/`:
+One command is the whole path: it stops any running copy, clears the stale
+Accessibility entry left by a previous install, builds the app with bun, puts a
+fresh **Reze.app** in `/Applications`, and launches it. After pulling changes,
+`make update` runs the same refresh.
+
+`make build` alone produces both bundles under
+`src-tauri/target/release/bundle/` without touching `/Applications`:
 
 | Path | What |
 | --- | --- |
 | `macos/Reze.app` | The app itself (~12 MB) |
 | `dmg/Reze_<version>_aarch64.dmg` | Disk image (~4 MB) with a drag-to-`Applications` layout |
 
-Open the `.dmg`, drag **Reze** onto **Applications**, then launch it. There is no
-Dock icon and no window on launch — it is a menu-bar app, so look for the bomb
-glyph up top. Press `⌘⇧Space` to confirm it is alive.
+There is no Dock icon and no window on launch — it is a menu-bar app, so look
+for the bomb glyph up top. Press `⌘⇧Space` to confirm it is alive.
 
 Two things to know on first run:
 
-- **Grant Accessibility again — every time you update.** macOS ties the
-  permission to the exact binary, so a dev build, the installed app, and every
-  rebuilt version of it are all separate entries. After replacing
-  `/Applications/Reze.app` the old grant no longer applies, and macOS does not
-  say so: the entry may even still look ticked in System Settings while being
-  inert. Untick and re-tick it, or remove the row with **−** and re-add.
-  The palette will tell you when this has happened, and `⌘↵` still copies to the
-  clipboard meanwhile.
+- **Grant Accessibility when macOS asks.** The permission is tied to the exact
+  binary, so a dev build, the installed app, and every rebuilt version of it
+  are all separate entries — and a stale one can keep looking ticked in System
+  Settings while being inert. `make` and `make update` reset the stale entry
+  before installing, so the fresh app prompts cleanly; all that is left is to
+  allow it. Until then the palette still works, and `⌘↵` still copies to the
+  clipboard.
 - **It is ad-hoc signed, not notarized.** Building and running it on your own
   machine is fine — locally built apps never get the quarantine flag. If you
   copy the `.dmg` to another Mac it *will* be flagged, and Gatekeeper will
@@ -68,9 +71,10 @@ Two things to know on first run:
   flag: `xattr -dr com.apple.quarantine /Applications/Reze.app`. Signing it
   properly needs a paid Apple Developer ID.
 
-`tauri build` targets the host architecture — `aarch64` on Apple Silicon. For a
+`make build` targets the host architecture — `aarch64` on Apple Silicon. For a
 binary that also runs on Intel Macs, build
-`--target universal-apple-darwin` (requires `rustup target add x86_64-apple-darwin`).
+`bun run tauri build --target universal-apple-darwin` (requires
+`rustup target add x86_64-apple-darwin`).
 
 To start Reze automatically, add it under System Settings → General → Login
 Items. There is no built-in setting for it.
@@ -265,7 +269,8 @@ go missing at runtime.
 
 ## Building
 
-Always build with `bun run tauri build` and install the whole `.app`.
+Always build with `bun run tauri build` (what `make build` runs) and install
+the whole `.app`.
 
 Running `cargo build` and copying just the binary over an installed bundle
 looks like it works and does not: the frontend is embedded at compile time, and
