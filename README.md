@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/reze.png" alt="Reze" width="640" />
+<img src="assets/reze.svg" alt="Reze" width="640" />
 
 # Reze
 
