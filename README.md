@@ -1,6 +1,14 @@
+<div align="center">
+
+<img src="assets/reze.png" alt="Reze" width="640" />
+
 # Reze
 
-A menu-bar app that turns short triggers into full prompts.
+**A menu-bar app that turns short triggers into full prompts.**
+
+</div>
+
+---
 
 Built for macOS. It also builds and runs on Linux under X11, with the
 macOS-specific pieces degrading rather than breaking: the palette paints its own
