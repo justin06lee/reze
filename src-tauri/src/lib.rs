@@ -1,5 +1,6 @@
 mod expand;
 mod focus;
+mod login;
 mod paste;
 mod store;
 mod typed;
@@ -71,6 +72,23 @@ fn accessibility_status() -> bool {
 #[tauri::command]
 fn request_accessibility() -> bool {
     paste::request_accessibility()
+}
+
+/// Whether Reze starts itself at login. Owned by the OS, not the library file
+/// — see [`login`] — so it is read back rather than remembered.
+#[tauri::command]
+fn login_item_status() -> login::LoginItem {
+    login::status()
+}
+
+#[tauri::command]
+fn set_login_item(enabled: bool) -> Result<(), String> {
+    login::set(enabled)
+}
+
+#[tauri::command]
+fn open_login_items_settings() {
+    login::open_settings();
 }
 
 #[tauri::command]
@@ -565,6 +583,9 @@ pub fn run() {
             accessibility_status,
             request_accessibility,
             open_accessibility_settings,
+            login_item_status,
+            set_login_item,
+            open_login_items_settings,
             deliver,
             hide_palette,
             show_palette,

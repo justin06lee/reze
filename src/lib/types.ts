@@ -11,6 +11,15 @@ export type Macro = {
 
 export type PasteMode = "paste" | "copy";
 
+/**
+ * Whether Reze starts itself at login, as the OS reports it.
+ *
+ * Deliberately absent from `Settings` — the system owns this, so it is read
+ * back rather than remembered. `requiresApproval` means macOS has the
+ * registration but the user switched it off in System Settings.
+ */
+export type LoginItemState = "enabled" | "disabled" | "requiresApproval" | "unsupported";
+
 export type Settings = {
   /** Opens the search palette. */
   hotkey: string;

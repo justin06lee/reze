@@ -76,8 +76,14 @@ binary that also runs on Intel Macs, build
 `bun run tauri build --target universal-apple-darwin` (requires
 `rustup target add x86_64-apple-darwin`).
 
-To start Reze automatically, add it under System Settings → General → Login
-Items. There is no built-in setting for it.
+To have it running from the moment you log in, turn on **Start Reze when I log
+in** under Settings in the editor. That registers the app with macOS itself, so
+it also appears under System Settings → General → Login Items — the two are the
+same switch, and either one can turn it off. Needs macOS 13 or later, and the
+installed `Reze.app` rather than a dev build.
+
+Reinstalling replaces the app bundle and clears the registration along with the
+Accessibility grant, so tick it again after `make update`.
 
 ## Using it
 
@@ -129,7 +135,8 @@ global shortcut swallows that key in *every* application.
 | `esc` | Back out of fill-in, or close |
 
 The tray icon opens the macro editor, where you can add, edit, tag, duplicate
-and delete macros, rebind the hotkeys, and change how expansions are delivered.
+and delete macros, rebind the hotkeys, change how expansions are delivered, and
+set Reze to start at login.
 
 ### Quitting
 
@@ -182,6 +189,11 @@ the change on next read. Diff it, commit it, sync it however you like.
 }
 ```
 
+Two settings are deliberately not in here: the Accessibility grant and the
+launch-at-login switch. Both are owned by macOS, and a copy of the answer in
+this file would start lying the moment you changed it in System Settings — so
+Reze reads them back from the OS instead of remembering them.
+
 ## Typing awareness
 
 Expanding in a terminal requires knowing what you typed, and nothing can be
@@ -233,6 +245,7 @@ bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/b
 - `src-tauri/src/expand.rs` — which trigger the typed words name (`cargo test`)
 - `src-tauri/src/typed.rs` — the keystroke tap behind terminal support
 - `src-tauri/src/focus.rs` — remembering who had focus, and pasteboard change detection
+- `src-tauri/src/login.rs` — the launch-at-login switch, via `SMAppService`
 - `src-tauri/src/lib.rs` — windows, tray, global hotkeys, file watcher, IPC commands
 - `src/lib/template.ts` — the template language (variables, includes, built-ins)
 - `src/lib/fuzzy.ts` — the palette's ranking
