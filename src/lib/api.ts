@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Library } from "./types";
+import type { Library, LoginItemState } from "./types";
 
 export const getLibrary = () => invoke<Library>("get_library");
 export const saveLibrary = (library: Library) => invoke<void>("save_library", { library });
@@ -10,6 +10,10 @@ export const readClipboard = () => invoke<string>("read_clipboard");
 export const accessibilityStatus = () => invoke<boolean>("accessibility_status");
 export const requestAccessibility = () => invoke<boolean>("request_accessibility");
 export const openAccessibilitySettings = () => invoke<void>("open_accessibility_settings");
+
+export const loginItemStatus = () => invoke<LoginItemState>("login_item_status");
+export const setLoginItem = (enabled: boolean) => invoke<void>("set_login_item", { enabled });
+export const openLoginItemsSettings = () => invoke<void>("open_login_items_settings");
 
 /** Hide the palette and put `text` into the app the user was actually in. */
 export const deliver = (text: string, copyOnly: boolean) =>

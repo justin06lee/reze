@@ -4,7 +4,7 @@ import * as api from "./lib/api";
 import { accelerator, isModifierOnly, prettyHotkey } from "./lib/hotkey";
 import { BUILTINS, collectVariables, expandIncludes } from "./lib/template";
 import { useLibrary } from "./lib/useLibrary";
-import { emptyMacro, type Library, type Macro } from "./lib/types";
+import { emptyMacro, type Library, type LoginItemState, type Macro } from "./lib/types";
 import "./editor.css";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -450,6 +450,8 @@ function SettingsPane({
         </label>
       </section>
 
+      <StartupSection />
+
       <section>
         <h2>Template syntax</h2>
         <ul className="e-syntax">
@@ -480,5 +482,90 @@ function SettingsPane({
         </div>
       </section>
     </div>
+  );
+}
+
+
+/**
+ * Launch at login.
+ *
+ * The OS owns this, not `macros.json`, so there is nothing to save — the
+ * checkbox reflects what the system reports and re-reads it whenever the window
+ * comes forward, because the user can flip it in System Settings behind us.
+ */
+function StartupSection() {
+  // Null until the first read lands. Starting at any real value would flash the
+  // wrong answer — most visibly "not available" on a machine where it is.
+  const [state, setState] = useState<LoginItemState | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(
+    () => api.loginItemStatus().then(setState).catch(() => {}),
+    [],
+  );
+
+  useEffect(() => {
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [refresh]);
+
+  const toggle = async (next: boolean) => {
+    setError(null);
+    try {
+      await api.setLoginItem(next);
+    } catch (e) {
+      setError(String(e));
+    }
+    // Re-read either way: the truth is whatever macOS now says, not what we asked for.
+    refresh();
+  };
+
+  return (
+    <section>
+      <h2>Startup</h2>
+      {state === null ? null : state === "unsupported" ? (
+        <p className="e-note">
+          Not available from here — this needs macOS 13 or later, and the installed{" "}
+          <code>Reze.app</code> rather than a dev build. Add Reze under System Settings →
+          General → Login Items by hand instead.
+        </p>
+      ) : (
+        <>
+          <label className="e-check">
+            <input
+              type="checkbox"
+              checked={state === "enabled"}
+              onChange={(e) => toggle(e.target.checked)}
+            />
+            <span>
+              Start Reze when I log in
+              <em>
+                Comes back in the menu bar on every login, so the hotkeys are live without
+                opening anything. macOS lists it under System Settings → General → Login Items.
+              </em>
+            </span>
+          </label>
+
+          {state === "requiresApproval" && (
+            <p className="e-warn">
+              Registered, but login items are switched off for Reze in System Settings — only
+              you can turn that back on.
+            </p>
+          )}
+          {error && <p className="e-warn">{error}</p>}
+          {(state === "requiresApproval" || error) && (
+            <div className="e-row">
+              <button onClick={() => api.openLoginItemsSettings()}>Open Login Items</button>
+            </div>
+          )}
+
+          <p className="e-note">
+            Reinstalling Reze replaces the app bundle and clears this, the same way it clears
+            the Accessibility grant — tick it again after <code>make update</code>.
+          </p>
+        </>
+      )}
+    </section>
   );
 }
