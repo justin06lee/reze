@@ -619,3 +619,201 @@ html[data-platform="other"] .e-titlebar {
   font-size: 14px;
   font-weight: 500;
 }
+
+/* -------------------------------------------------------- folder macros */
+
+/* A quiet divider, not a heading — the list underneath is the same kind of
+   row, just derived rather than authored. */
+.e-item-head {
+  padding: 14px 9px 5px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--fg-faint);
+  cursor: default;
+  border-radius: 0;
+}
+
+.e-item-head:hover {
+  background: none;
+}
+
+.e-item-clip {
+  display: inline-flex;
+  margin-right: 5px;
+  color: var(--fg-faint);
+  vertical-align: -1px;
+}
+
+.e-detail--folder {
+  gap: 18px;
+}
+
+.e-folder-head h2 {
+  margin: 0 0 4px;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.e-folder-head p {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.e-folder-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-height: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-raised);
+}
+
+.e-folder-preview .a-media {
+  max-height: 100%;
+  border-radius: 6px;
+}
+
+.e-folder-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.e-folder-facts em {
+  display: inline-block;
+  width: 44px;
+  font-style: normal;
+  color: var(--fg-faint);
+}
+
+/* ------------------------------------------------------------- settings */
+
+.e-folders {
+  list-style: none;
+  margin: 10px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.e-folders li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: var(--bg-raised);
+  font-size: 12px;
+}
+
+.e-folders code {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.e-folders button {
+  flex: none;
+  background: var(--bg-input);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 9px;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.e-folders button:hover {
+  color: var(--fg);
+}
+
+.e-folders-empty {
+  color: var(--fg-faint);
+}
+
+.e-badge {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 20px;
+  background: var(--bg-input);
+  color: var(--fg-faint);
+  font-size: 10.5px;
+}
+
+.e-tools {
+  list-style: none;
+  margin: 12px 0 6px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+}
+
+.e-tools li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Green when found, red when not — the one thing this list exists to say. */
+.e-tool-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.e-tools li[data-found="true"] .e-tool-dot {
+  background: #3fb950;
+}
+
+.e-tools code {
+  width: 92px;
+  flex: none;
+}
+
+.e-tools em {
+  flex: none;
+  font-style: normal;
+  color: var(--fg-dim);
+}
+
+.e-tool-at {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+
+/* A failed grab is a tool explaining itself, which is usually several lines. */
+.e-grab-message {
+  white-space: pre-wrap;
+  max-height: 8em;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.e-banner[data-grab="failed"] {
+  background: rgba(255, 80, 80, 0.15);
+}
+
+.e-banner[data-grab="done"] {
+  background: rgba(63, 185, 80, 0.15);
+}

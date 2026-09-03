@@ -134,6 +134,9 @@ global shortcut swallows that key in *every* application.
 | `⌘↵` | Put the expansion on the clipboard instead of pasting |
 | `esc` | Back out of fill-in, or close |
 
+And one that never opens anything: `⌥⇧D` downloads whatever the link on your
+clipboard points at. See [Grabbing a link](#grabbing-a-link).
+
 The tray icon opens the macro editor, where you can add, edit, tag, duplicate
 and delete macros, [attach files](#attachments) to them, rebind the hotkeys,
 change how expansions are delivered, and set Reze to start at login.
@@ -209,6 +212,93 @@ sweeping on that would take every attachment with it. Anything imported in the
 last minute is spared regardless, since a dropped file exists for a moment
 before the macro that references it is written.
 
+### Watched folders
+
+Attaching files one at a time is fine for a handful. For a collection, point
+Reze at the folder instead:
+
+**Settings → Folders → Add folder…**
+
+Every file in it becomes a macro on its own, named after the file, with its
+subfolders as tags. Add a file and the macro appears; delete it and the macro
+goes; rename it and the trigger changes. A folder like
+
+```
+~/refs/
+├── memes/
+│   └── cats/
+│       └── tabby.png     →  trigger "tabby",  tags #memes #cats
+└── logo.svg              →  trigger "logo"
+```
+
+is a library of two macros without a word typed into the editor.
+
+These are **derived**, not authored, so:
+
+- They are never written into `macros.json`. The folder is what they are made
+  of, the way that file is for the ones you wrote.
+- Their files are read where they lie — nothing is copied, because that folder
+  is already yours and shadowing a hundred gigabytes of video inside `~/.reze`
+  would be absurd.
+- The editor shows them read-only. To make one yours — to add text around it,
+  say — press **Make an editable copy**, which copies its file into the asset
+  library and hands you an ordinary macro.
+- Where a trigger name is claimed twice, the one you wrote wins.
+
+Dotfiles are skipped, subfolders are followed eight deep, and the scan stops at
+two thousand files so that pointing this at a home directory degrades rather
+than hangs.
+
+## Grabbing a link
+
+Copy the URL of a post, press `⌥⇧D`, and whatever the post is made of is
+downloaded into the first watched folder — which makes it a macro a moment
+later, with no editor and no window.
+
+```
+   copy https://www.youtube.com/watch?v=…
+              ⌥⇧D
+   ~/.reze/media/youtube - jawed - Me at the zoo.mp4
+              ↓
+   a macro called "youtube - jawed - Me at the zoo"
+```
+
+Names come from the post: the site, who posted it, and the title. That is the
+whole point — a folder of `video.mp4` and `image.jpg` would be useless a week
+later.
+
+### What it uses
+
+Nothing is bundled. Three tools are looked for, and **Settings → Grab from a
+link** says which are present and what to type for the rest:
+
+| Tool | For | Without it |
+| --- | --- | --- |
+| `yt-dlp` | Video, and the site knowledge for most of the web | No video from any post |
+| `gallery-dl` | Images, which `yt-dlp` deliberately does not do | Image-only posts fail |
+| `ffmpeg` | Joining the separate streams YouTube serves | Video capped around 720p |
+
+```bash
+brew install yt-dlp gallery-dl ffmpeg
+```
+
+They are searched for on `PATH` and in the usual Homebrew and MacPorts
+locations, because an app launched from Finder inherits a `PATH` from `launchd`
+that has none of them in it.
+
+A link straight to a file — `…/photo.png` — skips all three and is fetched with
+`curl`, so that much works with nothing installed.
+
+Video is asked for as mp4 where the site offers it, since webm is refused or
+silently ignored by most of macOS.
+
+### What it will not do
+
+Only public posts. Nothing here logs in, supplies credentials, or works around
+access control — anything you could not open in a browser cannot be grabbed
+either. It is a faster way to save what you can already see, and respecting
+whatever the site's terms allow you to save is on you.
+
 ## Template syntax
 
 Deliberately tiny — anything more expressive belongs in the prompt itself.
@@ -237,6 +327,8 @@ the change on next read. Diff it, commit it, sync it however you like.
   "settings": {
     "hotkey": "CmdOrCtrl+Shift+Space",
     "expandHotkey": "Alt+Space", // expand the trigger at the caret
+    "grabHotkey": "Alt+Shift+D", // download the link on the clipboard
+    "folders": ["~/.reze/media"],// every file in these becomes a macro
     "trackTyping": true,         // needed for expansion inside terminals
     "pasteMode": "paste",        // or "copy" to never paste directly
     "restoreClipboard": true
@@ -310,6 +402,8 @@ bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/b
 - `src-tauri/src/paste.rs` — clipboard + synthesized keystrokes, and the permission check
 - `src-tauri/src/assets.rs` — the attachment library on disk (`cargo test`)
 - `src-tauri/src/clip.rs` — the pasteboard, for everything that is not text
+- `src-tauri/src/folders.rs` — watched folders becoming macros (`cargo test`)
+- `src-tauri/src/grab.rs` — a URL becoming a file (`cargo test`)
 - `src-tauri/src/expand.rs` — which trigger the typed words name (`cargo test`)
 - `src-tauri/src/typed.rs` — the keystroke tap behind terminal support
 - `src-tauri/src/focus.rs` — remembering who had focus, and pasteboard change detection

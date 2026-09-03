@@ -114,7 +114,7 @@ export default function Palette() {
       // side of the trigger goes back exactly as it was.
       const affix = affixRef.current;
       const text = affix ? affix.head + body + affix.tail : body;
-      const files = macro?.attachments.map((a) => a.file) ?? [];
+      const files = macro?.attachments ?? [];
       try {
         // "Copy only" is either an explicit ⌘↵ or the global preference.
         await api.deliver(text, copyOnly || library?.settings.pasteMode === "copy", files);

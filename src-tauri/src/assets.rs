@@ -20,14 +20,23 @@ const SWEEP_GRACE: Duration = Duration::from_secs(60);
 
 /// A file attached to a macro.
 ///
-/// `file` is a bare name inside the assets directory, never a path — see
-/// [`path_for`], which refuses anything else.
+/// It lives in one of two places. Files you attach by hand are **copied** into
+/// the assets directory and named by `file`, so the macro survives the original
+/// being deleted. Files in a [watched folder](crate::folders) are **referenced
+/// where they lie** by `path` — that folder is yours, and copying a hundred
+/// gigabytes of video to shadow it would be absurd.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
     pub id: String,
-    /// Generated name inside `~/.reze/assets`, e.g. `a1b2….png`.
+    /// Generated name inside `~/.reze/assets`, e.g. `a1b2….png`. Empty when
+    /// `path` is set.
+    #[serde(default)]
     pub file: String,
+    /// Absolute path to a file outside the library. Set only for watched
+    /// folders; takes precedence over `file`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// What the file was called when it came in, for display only.
     pub name: String,
     /// Which preview the UI should draw: `image`, `video`, `audio` or `file`.
@@ -38,6 +47,18 @@ pub struct Attachment {
 
 pub fn assets_dir() -> PathBuf {
     crate::store::config_dir().join("assets")
+}
+
+/// Where this attachment's bytes actually are.
+pub fn resolve(attachment: &Attachment) -> Result<PathBuf, String> {
+    match &attachment.path {
+        // A folder attachment names an absolute path we put there ourselves
+        // during the scan. Relative would mean relative to the working
+        // directory, which for a launched app is `/` — never what was meant.
+        Some(path) if Path::new(path).is_absolute() => Ok(PathBuf::from(path)),
+        Some(path) => Err(format!("{path:?} is not an absolute path")),
+        None => path_for(&attachment.file),
+    }
 }
 
 /// Resolve a stored `file` name to a real path.
@@ -106,7 +127,29 @@ fn describe(dest: &Path, name: &str, ext: &str, bytes: u64) -> Attachment {
             .and_then(|n| n.to_str())
             .unwrap_or_default()
             .to_string(),
+        path: None,
         name: name.to_string(),
+        kind: kind_for(&mime).to_string(),
+        mime,
+        bytes,
+    }
+}
+
+/// An attachment for a file that stays where it is — see [`Attachment`].
+pub fn referencing(path: &Path, bytes: u64) -> Attachment {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let mime = mime_for(&ext);
+    Attachment {
+        // Derived from the path, not random: a folder is rescanned constantly,
+        // and a fresh id every time would make React rebuild every preview.
+        id: format!("folder:{}", path.display()),
+        file: String::new(),
+        path: Some(path.to_string_lossy().to_string()),
+        name: display_name(path),
         kind: kind_for(&mime).to_string(),
         mime,
         bytes,

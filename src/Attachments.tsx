@@ -24,7 +24,7 @@ export function useAttachmentUrl(attachment: Attachment): string | null {
     return () => {
       alive = false;
     };
-  }, [attachment.file]);
+  }, [attachment.file, attachment.path]);
   return url;
 }
 

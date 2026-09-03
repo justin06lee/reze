@@ -2,6 +2,8 @@ mod assets;
 mod clip;
 mod expand;
 mod focus;
+mod folders;
+mod grab;
 mod login;
 mod paste;
 mod store;
@@ -9,6 +11,8 @@ mod typed;
 
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
@@ -33,23 +37,49 @@ const PALETTE_CORNER_RADIUS: f64 = 14.0;
 
 // ---------------------------------------------------------------- commands
 
+/// The library as the windows see it: the macros you wrote, followed by the
+/// ones the [watched folders](folders) contain.
+///
+/// Authored first so that where a trigger name is claimed twice, the one you
+/// wrote deliberately wins over a file that happens to share its name —
+/// expand-in-place takes the first match.
+fn merged() -> Result<Library, String> {
+    let mut library = store::load()?;
+    let derived = folders::scan(&library.settings.folders, &library.folder_usage);
+    library.macros.extend(derived);
+    Ok(library)
+}
+
 #[tauri::command]
 fn get_library() -> Result<Library, String> {
-    store::load()
+    merged()
 }
 
 #[tauri::command]
 fn save_library(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
-    library: Library,
+    mut library: Library,
 ) -> Result<(), String> {
+    // Folder macros are rebuilt from the folder on every scan. Writing them here
+    // would persist a snapshot that goes stale the moment a file is renamed, and
+    // that the next scan would then duplicate.
+    library.macros.retain(|m| m.folder.is_none());
+
+    let previous_folders = store::load().map(|l| l.settings.folders).unwrap_or_default();
     let written = store::save(&library)?;
     *state.last_written.lock().unwrap() = written;
     // Saving is the only moment the set of referenced files can shrink, so it is
     // the only moment worth looking for orphans.
     assets::sweep(&library);
-    app.emit("library-changed", &library).ok();
+
+    if previous_folders != library.settings.folders {
+        watch_folders(&app, &library.settings.folders);
+    }
+
+    // Hand back the merged view, not what was written — the windows must not
+    // lose their folder macros just because they saved an edit to another one.
+    app.emit("library-changed", &merged().unwrap_or(library)).ok();
     Ok(())
 }
 
@@ -57,8 +87,14 @@ fn save_library(
 #[tauri::command]
 fn bump_usage(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
     let mut lib = store::load()?;
-    if let Some(m) = lib.macros.iter_mut().find(|m| m.id == id) {
+    if id.starts_with("folder:") {
+        // A folder macro is not in this file and cannot carry its own count —
+        // see `Library::folder_usage`.
+        *lib.folder_usage.entry(id).or_insert(0) += 1;
+    } else if let Some(m) = lib.macros.iter_mut().find(|m| m.id == id) {
         m.usage_count += 1;
+    } else {
+        return Ok(()); // gone since the palette listed it; nothing to record
     }
     let written = store::save(&lib)?;
     *state.last_written.lock().unwrap() = written;
@@ -170,16 +206,195 @@ struct Imported {
     errors: Vec<String>,
 }
 
-/// Resolve stored attachment names to real paths, dropping any that no longer
-/// exist. A file deleted out from under the library must not fail the whole
-/// paste — the text half is still worth delivering.
-fn attachment_paths(files: &[String]) -> Vec<PathBuf> {
-    files
+/// Resolve attachments to real paths, dropping any that no longer exist.
+///
+/// A file deleted out from under the library must not fail the whole paste —
+/// the text half is still worth delivering — and a watched folder on an
+/// unplugged drive is exactly that case.
+fn attachment_paths(attachments: &[assets::Attachment]) -> Vec<PathBuf> {
+    attachments
         .iter()
-        .filter_map(|f| assets::path_for(f).ok())
+        .filter_map(|a| assets::resolve(a).ok())
         .filter(|p| p.exists())
         .collect()
 }
+
+// ---------------------------------------------------------------- folders
+
+/// Replace the watched folder list, then rescan.
+#[tauri::command]
+fn set_folders(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    folders: Vec<String>,
+) -> Result<(), String> {
+    let mut library = store::load()?;
+    library.settings.folders = folders;
+    let written = store::save(&library)?;
+    *state.last_written.lock().unwrap() = written;
+
+    watch_folders(&app, &library.settings.folders);
+    app.emit("library-changed", &merged()?).ok();
+    Ok(())
+}
+
+/// Show a file or folder in Finder. Used for both the library and the watched
+/// folders, which is why it takes a path rather than knowing one.
+#[tauri::command]
+fn reveal_path(path: String) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open")
+        .arg("-R")
+        .arg(&path)
+        .spawn();
+
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer")
+        .arg(format!("/select,{path}"))
+        .spawn();
+}
+
+// ------------------------------------------------------------------ grab
+
+/// Which download tools are installed, so Settings can say what is missing.
+#[tauri::command]
+fn grab_tools() -> grab::Tools {
+    grab::tools()
+}
+
+/// One grab at a time.
+///
+/// Not just politeness: `gallery-dl` is identified by which files appeared in
+/// the folder while it ran, and two overlapping downloads would each claim the
+/// other's.
+#[derive(Default)]
+struct Grabbing(AtomicBool);
+
+/// What the grab is doing, for the tray item and both windows.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GrabStatus {
+    /// "working", "done" or "failed" — the shape of the message, for styling.
+    state: &'static str,
+    message: String,
+}
+
+#[tauri::command]
+fn grab_now(app: AppHandle) {
+    start_grab(&app);
+}
+
+/// Download whatever the URL on the clipboard points at, into the first
+/// watched folder — where the scan turns it into a macro on its own.
+fn start_grab(app: &AppHandle) {
+    if app
+        .state::<Grabbing>()
+        .0
+        .swap(true, Ordering::SeqCst)
+    {
+        report_grab(app, "working", "Already grabbing something.".into());
+        return;
+    }
+
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let outcome = run_grab(&app);
+        app.state::<Grabbing>().0.store(false, Ordering::SeqCst);
+
+        match outcome {
+            Ok(message) => {
+                report_grab(&app, "done", message);
+                // The file is in a watched folder, so it is already a macro —
+                // but the watcher debounce means telling the windows now is
+                // what makes it feel immediate.
+                if let Ok(library) = merged() {
+                    let _ = app.emit("library-changed", &library);
+                }
+            }
+            Err(e) => report_grab(&app, "failed", e),
+        }
+    });
+}
+
+fn run_grab(app: &AppHandle) -> Result<String, String> {
+    let url = paste::read_clipboard()?;
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return Err("Nothing on the clipboard — copy the link to a post first.".into());
+    }
+
+    // Shown before the work starts, because the work is the slow part and a
+    // hotkey that appears to do nothing for thirty seconds is a broken hotkey.
+    report_grab(app, "working", format!("Grabbing {}…", host_of(&url)));
+
+    let library = store::load()?;
+    let dir = folders::download_dir(&library.settings.folders)?;
+    let grabbed = grab::grab(&url, &dir)?;
+
+    Ok(format!(
+        "Grabbed {}",
+        grabbed
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| grabbed.via.to_string()),
+    ))
+}
+
+/// Just the host, for a status line that has to fit in a menu item.
+fn host_of(url: &str) -> String {
+    url.split_once("://")
+        .map(|(_, rest)| rest.split('/').next().unwrap_or(rest))
+        .unwrap_or(url)
+        .trim_start_matches("www.")
+        .to_string()
+}
+
+/// Put a grab's progress everywhere it can be seen.
+///
+/// A menu-bar app has no window to speak through — the hotkey is pressed while
+/// the user is in another app entirely — so this goes three places at once: the
+/// tray menu, a system notification, and both windows for whichever is open.
+fn report_grab(app: &AppHandle, state: &'static str, message: String) {
+    if let Some(item) = app.state::<TrayStatus>().0.lock().unwrap().as_ref() {
+        let _ = item.set_text(&message);
+    }
+    let _ = app.emit(
+        "grab-status",
+        GrabStatus {
+            state,
+            message: message.clone(),
+        },
+    );
+    // Only the outcomes: a banner for "starting…" followed by one for "done"
+    // is twice as much interruption as the news is worth.
+    if state != "working" {
+        notify(&message);
+    }
+}
+
+/// A system notification banner.
+#[cfg(target_os = "macos")]
+fn notify(message: &str) {
+    // Quotes are the only thing that can break out of the AppleScript string.
+    let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
+    let _ = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(format!(
+            "display notification \"{escaped}\" with title \"Reze\""
+        ))
+        .spawn();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn notify(_message: &str) {}
+
+/// The tray menu's first item, which doubles as the grab's status line.
+#[derive(Default)]
+struct TrayStatus(Mutex<Option<MenuItem<tauri::Wry>>>);
 
 /// Hide the palette, then deliver `text` and `attachments` to whatever app
 /// regained focus.
@@ -188,7 +403,7 @@ async fn deliver(
     app: AppHandle,
     text: String,
     copy_only: bool,
-    attachments: Vec<String>,
+    attachments: Vec<assets::Attachment>,
 ) -> Result<(), String> {
     // Checked before hiding, not inside the worker: an error raised after the
     // window is gone is an error the user never sees. Missing Accessibility is
@@ -305,13 +520,14 @@ fn resize_palette(app: AppHandle, height: f64) {
 /// without re-reading the library from disk on every keypress.
 #[derive(Default)]
 struct Hotkeys {
-    palette: std::sync::Mutex<Option<Shortcut>>,
-    expand: std::sync::Mutex<Option<Shortcut>>,
+    palette: Mutex<Option<Shortcut>>,
+    expand: Mutex<Option<Shortcut>>,
+    grab: Mutex<Option<Shortcut>>,
 }
 
 #[tauri::command]
-fn set_hotkeys(app: AppHandle, palette: String, expand: String) -> Result<(), String> {
-    register_hotkeys(&app, &palette, &expand)
+fn set_hotkeys(app: AppHandle, palette: String, expand: String, grab: String) -> Result<(), String> {
+    register_hotkeys(&app, &palette, &expand, &grab)
 }
 
 /// Registers both shortcuts, replacing whatever was registered before.
@@ -319,26 +535,36 @@ fn set_hotkeys(app: AppHandle, palette: String, expand: String) -> Result<(), St
 /// Parsed up front so an invalid accelerator is rejected before we tear down
 /// the working ones — otherwise a typo in Settings would leave the user with
 /// no way to open the app at all.
-fn register_hotkeys(app: &AppHandle, palette: &str, expand: &str) -> Result<(), String> {
+fn register_hotkeys(
+    app: &AppHandle,
+    palette: &str,
+    expand: &str,
+    grab: &str,
+) -> Result<(), String> {
     let palette_shortcut =
         Shortcut::from_str(palette).map_err(|e| format!("invalid palette hotkey: {e}"))?;
     let expand_shortcut =
         Shortcut::from_str(expand).map_err(|e| format!("invalid expand hotkey: {e}"))?;
+    let grab_shortcut = Shortcut::from_str(grab).map_err(|e| format!("invalid grab hotkey: {e}"))?;
 
     app.global_shortcut()
         .unregister_all()
         .map_err(|e| e.to_string())?;
 
-    app.global_shortcut()
-        .register(palette_shortcut)
-        .map_err(|e| format!("could not register {palette}: {e}"))?;
-    app.global_shortcut()
-        .register(expand_shortcut)
-        .map_err(|e| format!("could not register {expand}: {e}"))?;
+    for (accelerator, shortcut) in [
+        (palette, palette_shortcut),
+        (expand, expand_shortcut),
+        (grab, grab_shortcut),
+    ] {
+        app.global_shortcut()
+            .register(shortcut)
+            .map_err(|e| format!("could not register {accelerator}: {e}"))?;
+    }
 
     let state = app.state::<Hotkeys>();
     *state.palette.lock().unwrap() = Some(palette_shortcut);
     *state.expand.lock().unwrap() = Some(expand_shortcut);
+    *state.grab.lock().unwrap() = Some(grab_shortcut);
     Ok(())
 }
 
@@ -585,6 +811,62 @@ struct Expansion {
     tail: String,
 }
 
+// -------------------------------------------------------- folder watcher
+
+/// Holds the watcher over the configured folders, so it can be replaced when
+/// the list changes. Dropping the old one is what stops it.
+#[derive(Default)]
+struct FolderWatch(Mutex<Option<notify::RecommendedWatcher>>);
+
+/// How long the folders must be quiet before a rescan.
+///
+/// Copying fifty files in produces fifty events; rescanning on each would mean
+/// fifty walks of the tree and fifty repaints for one gesture.
+const FOLDER_SETTLE: Duration = Duration::from_millis(400);
+
+/// Watch `folders` and rebroadcast the library whenever their contents change.
+///
+/// Replaces any previous watch wholesale. The old watcher is dropped, which
+/// closes its channel, which ends the thread draining it — so changing the
+/// folder list leaves nothing behind.
+fn watch_folders(app: &AppHandle, folders: &[String]) {
+    let dirs = folders::existing(folders);
+    let (tx, rx) = channel();
+    let Ok(mut watcher) = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if res.is_ok() {
+            let _ = tx.send(());
+        }
+    }) else {
+        return;
+    };
+    for dir in &dirs {
+        if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
+            eprintln!("reze: not watching {dir:?}: {e}");
+        }
+        // The previews are drawn from these files directly, and the asset
+        // protocol refuses anything outside its scope. Widening it to a folder
+        // the user chose is the same trust we already extend to the asset
+        // library: the web view only ever loads our own bundled code, and no
+        // remote content runs in it.
+        if let Err(e) = app.asset_protocol_scope().allow_directory(dir, true) {
+            eprintln!("reze: no previews for {dir:?}: {e}");
+        }
+    }
+
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        while rx.recv().is_ok() {
+            // Swallow the rest of the burst before doing any work.
+            while rx.recv_timeout(FOLDER_SETTLE).is_ok() {}
+            if let Ok(library) = merged() {
+                let _ = handle.emit("library-changed", &library);
+            }
+        }
+    });
+
+    *app.state::<FolderWatch>().0.lock().unwrap() = Some(watcher);
+}
+
 // ---------------------------------------------------------------- watcher
 
 /// Reload and broadcast whenever the library file changes underneath us,
@@ -626,7 +908,9 @@ fn spawn_watcher(app: AppHandle) {
             }
             match serde_json::from_str::<Library>(&raw) {
                 Ok(lib) => {
-                    let _ = app.emit("library-changed", &lib);
+                    // Merged, not as parsed: the file holds only what was
+                    // authored, and the windows need the folder macros with it.
+                    let _ = app.emit("library-changed", &merged().unwrap_or(lib));
                 }
                 Err(e) => {
                     let _ = app.emit("library-error", e.to_string());
@@ -658,12 +942,17 @@ pub fn run() {
                         expand_in_place(app);
                     } else if is(&hotkeys.palette) {
                         toggle_palette(app);
+                    } else if is(&hotkeys.grab) {
+                        start_grab(app);
                     }
                 })
                 .build(),
         )
         .manage(AppState::new())
         .manage(Hotkeys::default())
+        .manage(Grabbing::default())
+        .manage(TrayStatus::default())
+        .manage(FolderWatch::default())
         .invoke_handler(tauri::generate_handler![
             get_library,
             save_library,
@@ -687,6 +976,10 @@ pub fn run() {
             assets_dir,
             import_files,
             import_clipboard,
+            set_folders,
+            reveal_path,
+            grab_tools,
+            grab_now,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -711,8 +1004,12 @@ pub fn run() {
                 *app.state::<AppState>().last_written.lock().unwrap() = body;
             }
 
-            if let Err(e) = register_hotkeys(&handle, &lib.settings.hotkey, &lib.settings.expand_hotkey)
-            {
+            if let Err(e) = register_hotkeys(
+                &handle,
+                &lib.settings.hotkey,
+                &lib.settings.expand_hotkey,
+                &lib.settings.grab_hotkey,
+            ) {
                 eprintln!("reze: {e}");
             }
 
@@ -725,13 +1022,38 @@ pub fn run() {
                 }
             }
 
+            // Disabled, so it reads as a label rather than something to click.
+            // A menu-bar app's only permanent surface is this menu, which makes
+            // it the honest place for "what did that hotkey just do".
+            let status_item =
+                MenuItem::with_id(app, "status", "Ready", false, None::<&str>)?;
+            let grab_item = MenuItem::with_id(
+                app,
+                "grab",
+                "Grab Link on Clipboard",
+                true,
+                None::<&str>,
+            )?;
             let open_item = MenuItem::with_id(app, "open", "Macro Editor…", true, None::<&str>)?;
             let palette_item =
                 MenuItem::with_id(app, "palette", "Show Palette", true, None::<&str>)?;
             let quit_item =
                 MenuItem::with_id(app, "quit", "Quit Reze", true, Some("CmdOrCtrl+Q"))?;
             let sep = PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(app, &[&palette_item, &open_item, &sep, &quit_item])?;
+            let sep2 = PredefinedMenuItem::separator(app)?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &status_item,
+                    &sep,
+                    &palette_item,
+                    &grab_item,
+                    &open_item,
+                    &sep2,
+                    &quit_item,
+                ],
+            )?;
+            *app.state::<TrayStatus>().0.lock().unwrap() = Some(status_item);
 
             // macOS gets a monochrome template glyph, which the system tints to
             // match the menu bar. Nothing else has template images, so a black
@@ -749,6 +1071,7 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "open" => show_editor(app),
                     "palette" => toggle_palette(app),
+                    "grab" => start_grab(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -767,6 +1090,7 @@ pub fn run() {
                 );
             }
 
+            watch_folders(&handle, &lib.settings.folders);
             spawn_watcher(handle);
             Ok(())
         })

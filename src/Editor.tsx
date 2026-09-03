@@ -1,14 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "./lib/api";
-import { AttachmentTile } from "./Attachments";
+import { AttachmentMedia, AttachmentTile, ClipIcon } from "./Attachments";
 import { accelerator, isModifierOnly, prettyHotkey } from "./lib/hotkey";
 import { BUILTINS, collectVariables, expandIncludes } from "./lib/template";
 import { useLibrary } from "./lib/useLibrary";
 import {
   emptyMacro,
+  formatBytes,
+  type GrabStatus,
+  type GrabTools,
+  type HotkeySlot,
   type Imported,
   type Library,
   type LoginItemState,
@@ -30,6 +35,7 @@ export default function Editor() {
   // itself. Tauri handles the drag natively, so there is no HTML drag event.
   const [dropping, setDropping] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [grab, setGrab] = useState<GrabStatus | null>(null);
 
   const saveTimer = useRef<number | null>(null);
   const armTimer = useRef<number | null>(null);
@@ -90,10 +96,39 @@ export default function Editor() {
     setSelectedId(fresh.id);
   }, [library, update]);
 
+  /**
+   * Copy a macro into one you own.
+   *
+   * For a folder macro this is the way to make it yours: its files are copied
+   * into the asset library so the copy no longer depends on the folder, and the
+   * `folder` mark is dropped so it stops being regenerated and starts being
+   * saved. That makes "Duplicate" the answer to "I want to add text to this one".
+   */
   const duplicateMacro = useCallback(
-    (m: Macro) => {
+    async (m: Macro) => {
       if (!library) return;
-      const copy = { ...m, id: crypto.randomUUID(), name: `${m.name} copy`, usageCount: 0 };
+      let attachments = m.attachments;
+      if (m.folder) {
+        const paths = m.attachments.map((a) => a.path).filter((p): p is string => Boolean(p));
+        const imported = await api.importFiles(paths).catch((e) => {
+          setNotice(String(e));
+          return null;
+        });
+        if (!imported) return;
+        if (imported.errors.length > 0) setNotice(imported.errors.join(" · "));
+        attachments = imported.attachments;
+      }
+      const copy: Macro = {
+        ...m,
+        id: crypto.randomUUID(),
+        name: m.folder ? m.name : `${m.name} copy`,
+        // The path it came from is the folder macro's description; a copy of it
+        // would be describing somewhere the copy no longer depends on.
+        description: m.folder ? "" : m.description,
+        attachments,
+        folder: undefined,
+        usageCount: 0,
+      };
       update({ ...library, macros: [copy, ...library.macros] });
       setSelectedId(copy.id);
     },
@@ -220,6 +255,29 @@ export default function Editor() {
   }, []);
 
   /**
+   * How a grab is going.
+   *
+   * The hotkey is pressed in another app entirely, so the tray item and a
+   * notification carry it — but if this window happens to be open it is the
+   * best place to show a failure, because a failure is usually several lines of
+   * a tool explaining itself.
+   */
+  useEffect(() => {
+    const un = listen<GrabStatus>("grab-status", (e) => {
+      setGrab(e.payload);
+      // A finished grab is news for a moment, not a banner to dismiss. A
+      // failure stays until it is read.
+      if (e.payload.state === "done") {
+        const done = e.payload;
+        setTimeout(() => setGrab((g) => (g === done ? null : g)), 6000);
+      }
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
+  /**
    * ⌘V with files on the clipboard.
    *
    * The event only tells us files are *there*; the bytes come from reading the
@@ -263,6 +321,11 @@ export default function Editor() {
       [m.name, m.description, ...m.tags].join(" ").toLowerCase().includes(q),
     );
   }, [macros, filter]);
+
+  // Listed apart because they are a different kind of thing, and because a
+  // folder of two thousand images would otherwise bury the ten you wrote.
+  const yours = useMemo(() => visible.filter((m) => !m.folder), [visible]);
+  const fromFolders = useMemo(() => visible.filter((m) => m.folder), [visible]);
 
   const analysis = useMemo(() => {
     if (!selected) return null;
@@ -322,6 +385,15 @@ export default function Editor() {
         </div>
       )}
 
+      {grab && (
+        <div className="e-banner" data-grab={grab.state}>
+          <div className="e-grab-message">{grab.message}</div>
+          <div className="e-banner-actions">
+            <button onClick={() => setGrab(null)}>Dismiss</button>
+          </div>
+        </div>
+      )}
+
       {showSettings ? (
         <SettingsPane library={library} update={update} />
       ) : (
@@ -339,24 +411,32 @@ export default function Editor() {
               </button>
             </div>
             <ul>
-              {visible.map((m) => (
-                <li
+              {yours.map((m) => (
+                <MacroRow
                   key={m.id}
-                  data-selected={m.id === selectedId}
-                  onClick={() => setSelectedId(m.id)}
-                >
-                  <span className="e-item-name">{m.name || "untitled"}</span>
-                  <span className="e-item-meta">
-                    {m.tags.map((t) => `#${t}`).join(" ")}
-                    {m.usageCount > 0 && <em> · {m.usageCount}×</em>}
-                  </span>
-                </li>
+                  macro={m}
+                  selected={m.id === selectedId}
+                  onSelect={() => setSelectedId(m.id)}
+                />
+              ))}
+              {fromFolders.length > 0 && (
+                <li className="e-item-head">From folders · {fromFolders.length}</li>
+              )}
+              {fromFolders.map((m) => (
+                <MacroRow
+                  key={m.id}
+                  macro={m}
+                  selected={m.id === selectedId}
+                  onSelect={() => setSelectedId(m.id)}
+                />
               ))}
               {visible.length === 0 && <li className="e-item-empty">No macros</li>}
             </ul>
           </aside>
 
-          {selected ? (
+          {selected?.folder ? (
+            <FolderDetail macro={selected} onAdopt={() => duplicateMacro(selected)} />
+          ) : selected ? (
             <section className="e-detail">
               <div className="e-fields">
                 <label className="e-field">
@@ -487,6 +567,87 @@ export default function Editor() {
   );
 }
 
+/** One macro in the sidebar. Folder macros are marked, not hidden. */
+function MacroRow({
+  macro,
+  selected,
+  onSelect,
+}: {
+  macro: Macro;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <li data-selected={selected} onClick={onSelect}>
+      <span className="e-item-name">
+        {macro.attachments.length > 0 && (
+          <span className="e-item-clip">
+            <ClipIcon />
+          </span>
+        )}
+        {macro.name || "untitled"}
+      </span>
+      <span className="e-item-meta">
+        {macro.tags.map((t) => `#${t}`).join(" ")}
+        {macro.usageCount > 0 && <em> · {macro.usageCount}×</em>}
+      </span>
+    </li>
+  );
+}
+
+/**
+ * A macro that came from a watched folder.
+ *
+ * Deliberately not the editing pane: the folder is what this macro is made of,
+ * so every field here would be overwritten by the next scan. Showing the real
+ * fields greyed out would be a lie about what is possible — this says what the
+ * macro is, where it came from, and the two things you can actually do.
+ */
+function FolderDetail({ macro, onAdopt }: { macro: Macro; onAdopt: () => void }) {
+  const file = macro.attachments[0];
+  return (
+    <section className="e-detail e-detail--folder">
+      <div className="e-folder-head">
+        <h2>{macro.name}</h2>
+        <p>
+          From <code>{macro.folder}</code>
+        </p>
+        <p className="e-note">
+          Made from the file, so it changes when the file does. Rename the file to rename the
+          trigger; move it out of the folder to remove the macro.
+        </p>
+      </div>
+
+      {file && (
+        <div className="e-folder-preview">
+          <AttachmentMedia attachment={file} playable />
+        </div>
+      )}
+
+      <div className="e-folder-facts">
+        <span>
+          <em>Path</em> {macro.description}
+        </span>
+        {macro.tags.length > 0 && (
+          <span>
+            <em>Tags</em> {macro.tags.map((t) => `#${t}`).join(" ")}
+          </span>
+        )}
+        {file && (
+          <span>
+            <em>File</em> {formatBytes(file.bytes)} · {file.mime}
+          </span>
+        )}
+      </div>
+
+      <div className="e-actions">
+        {file?.path && <button onClick={() => api.revealPath(file.path!)}>Reveal in Finder</button>}
+        <button onClick={onAdopt}>Make an editable copy</button>
+      </div>
+    </section>
+  );
+}
+
 function SettingsPane({
   library,
   update,
@@ -494,7 +655,7 @@ function SettingsPane({
   library: Library;
   update: (next: Library) => void;
 }) {
-  const [recording, setRecording] = useState<"hotkey" | "expandHotkey" | null>(null);
+  const [recording, setRecording] = useState<HotkeySlot | null>(null);
   const [path, setPath] = useState("");
   const [hotkeyError, setHotkeyError] = useState<string | null>(null);
 
@@ -517,7 +678,7 @@ function SettingsPane({
       // Register before saving: if the combination is already taken by another
       // app, the old one keeps working and nothing is written.
       api
-        .setHotkeys(next.hotkey, next.expandHotkey)
+        .setHotkeys(next.hotkey, next.expandHotkey, next.grabHotkey)
         .then(() => {
           setHotkeyError(null);
           update({ ...library, settings: next });
@@ -530,7 +691,7 @@ function SettingsPane({
 
   const s = library.settings;
 
-  const recorder = (slot: "hotkey" | "expandHotkey") => (
+  const recorder = (slot: HotkeySlot) => (
     <div className="e-row">
       <button
         className="e-hotkey"
@@ -589,6 +750,10 @@ function SettingsPane({
         </label>
         <p className="e-note">Takes effect next time Reze starts.</p>
       </section>
+
+      <FoldersSection library={library} />
+
+      <GrabSection recorder={recorder} />
 
       <section>
         <h2>Delivery</h2>
@@ -658,6 +823,142 @@ function SettingsPane({
   );
 }
 
+
+/**
+ * Watched folders.
+ *
+ * Saved through their own command rather than the debounced library write: the
+ * backend has to re-point the file watcher and rescan, and doing that on a
+ * timer after a click would leave the list looking applied before it was.
+ */
+function FoldersSection({ library }: { library: Library }) {
+  const [error, setError] = useState<string | null>(null);
+  const folders = library.settings.folders;
+
+  const apply = (next: string[]) =>
+    api.setFolders(next).catch((e) => setError(String(e)));
+
+  const add = async () => {
+    setError(null);
+    const picked = await open({ directory: true, multiple: false, title: "Watch folder" }).catch(
+      (e) => {
+        setError(String(e));
+        return null;
+      },
+    );
+    if (typeof picked !== "string" || folders.includes(picked)) return;
+    apply([...folders, picked]);
+  };
+
+  return (
+    <section>
+      <h2>Folders</h2>
+      <p>
+        Every file in these becomes a macro on its own, named after the file, with its
+        subfolders as tags. Add a file and it appears; delete one and it goes. They are read
+        where they lie — nothing is copied.
+      </p>
+
+      <ul className="e-folders">
+        {folders.map((folder, i) => (
+          <li key={folder}>
+            <code>{folder}</code>
+            {i === 0 && <span className="e-badge">grabs land here</span>}
+            <button onClick={() => api.revealPath(folder)}>Reveal</button>
+            <button onClick={() => apply(folders.filter((f) => f !== folder))}>Remove</button>
+          </li>
+        ))}
+        {folders.length === 0 && (
+          <li className="e-folders-empty">
+            No folders watched. Grabbing needs one to save into.
+          </li>
+        )}
+      </ul>
+
+      <div className="e-row">
+        <button onClick={add}>Add folder…</button>
+      </div>
+      {error && <p className="e-warn">{error}</p>}
+      <p className="e-note">
+        Macros from a folder cannot be edited here — the folder is what they are made of, so
+        rename or delete the file instead.
+      </p>
+    </section>
+  );
+}
+
+/**
+ * Grabbing a link.
+ *
+ * The tools are looked up rather than bundled, so this section's real job is to
+ * say plainly which of them are missing and what to type to get them.
+ */
+function GrabSection({ recorder }: { recorder: (slot: HotkeySlot) => React.ReactNode }) {
+  const [tools, setTools] = useState<GrabTools | null>(null);
+
+  useEffect(() => {
+    // Re-checked when the window comes forward, so installing a tool and
+    // switching back shows it without a restart.
+    const check = () => api.grabTools().then(setTools).catch(() => {});
+    check();
+    window.addEventListener("focus", check);
+    return () => window.removeEventListener("focus", check);
+  }, []);
+
+  const missing = tools
+    ? [
+        !tools.ytDlp && "yt-dlp",
+        !tools.galleryDl && "gallery-dl",
+        !tools.ffmpeg && "ffmpeg",
+      ].filter(Boolean)
+    : [];
+
+  return (
+    <section>
+      <h2>Grab from a link</h2>
+      <p>
+        Copy the URL of a post — YouTube, X, Instagram, Reddit, TikTok, or a link straight to
+        an image — and press this. Whatever the post is made of is downloaded into the first
+        watched folder above and named after where it came from, which makes it a macro a
+        moment later.
+      </p>
+      {recorder("grabHotkey")}
+
+      <div className="e-row">
+        <button onClick={() => api.grabNow()}>Grab what is on the clipboard</button>
+      </div>
+
+      {tools && (
+        <ul className="e-tools">
+          <ToolRow name="yt-dlp" at={tools.ytDlp} does="video, and most sites" />
+          <ToolRow name="gallery-dl" at={tools.galleryDl} does="images" />
+          <ToolRow name="ffmpeg" at={tools.ffmpeg} does="video above 720p" />
+        </ul>
+      )}
+      {missing.length > 0 && (
+        <p className="e-warn">
+          Missing {missing.join(", ")} — install with{" "}
+          <code>brew install {missing.join(" ")}</code>
+        </p>
+      )}
+      <p className="e-note">
+        Only public posts. Nothing here logs in or works around access control, so anything you
+        could not open in a browser cannot be grabbed either.
+      </p>
+    </section>
+  );
+}
+
+function ToolRow({ name, at, does }: { name: string; at: string | null; does: string }) {
+  return (
+    <li data-found={at ? "true" : "false"}>
+      <span className="e-tool-dot" aria-hidden />
+      <code>{name}</code>
+      <em>{does}</em>
+      <span className="e-tool-at">{at ?? "not installed"}</span>
+    </li>
+  );
+}
 
 /**
  * Launch at login.

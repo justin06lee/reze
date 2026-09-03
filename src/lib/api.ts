@@ -1,5 +1,11 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import type { Attachment, Imported, Library, LoginItemState } from "./types";
+import type {
+  Attachment,
+  GrabTools,
+  Imported,
+  Library,
+  LoginItemState,
+} from "./types";
 
 export const getLibrary = () => invoke<Library>("get_library");
 export const saveLibrary = (library: Library) => invoke<void>("save_library", { library });
@@ -17,9 +23,10 @@ export const openLoginItemsSettings = () => invoke<void>("open_login_items_setti
 
 /**
  * Hide the palette and put `text` plus `attachments` into the app the user was
- * actually in. Attachments are the bare file names stored on the macro.
+ * actually in. Whole attachments, since each knows for itself whether its bytes
+ * are in the asset library or in a watched folder.
  */
-export const deliver = (text: string, copyOnly: boolean, attachments: string[]) =>
+export const deliver = (text: string, copyOnly: boolean, attachments: Attachment[]) =>
   invoke<void>("deliver", { text, copyOnly, attachments });
 
 export const importFiles = (paths: string[]) => invoke<Imported>("import_files", { paths });
@@ -31,10 +38,18 @@ export const showPalette = () => invoke<void>("show_palette");
 export const openEditor = () => invoke<void>("open_editor");
 export const quit = () => invoke<void>("quit");
 export const resizePalette = (height: number) => invoke<void>("resize_palette", { height });
-export const setHotkeys = (palette: string, expand: string) =>
-  invoke<void>("set_hotkeys", { palette, expand });
+export const setHotkeys = (palette: string, expand: string, grab: string) =>
+  invoke<void>("set_hotkeys", { palette, expand, grab });
 export const libraryPath = () => invoke<string>("library_path");
 export const revealLibrary = () => invoke<void>("reveal_library");
+export const revealPath = (path: string) => invoke<void>("reveal_path", { path });
+
+/** Replace the watched folder list and rescan. */
+export const setFolders = (folders: string[]) => invoke<void>("set_folders", { folders });
+
+export const grabTools = () => invoke<GrabTools>("grab_tools");
+/** Download whatever the URL on the clipboard points at. Returns immediately. */
+export const grabNow = () => invoke<void>("grab_now");
 
 /**
  * Where attachment files live on disk.
@@ -54,5 +69,7 @@ export const assetsDir = () => {
 
 /** A URL the webview can load an attachment from — see the asset protocol. */
 export async function attachmentUrl(attachment: Attachment): Promise<string> {
-  return convertFileSrc(`${await assetsDir()}/${attachment.file}`);
+  // A watched folder's file stays where it is, so it is already a full path.
+  const path = attachment.path ?? `${await assetsDir()}/${attachment.file}`;
+  return convertFileSrc(path);
 }
