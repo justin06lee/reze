@@ -260,6 +260,41 @@
   font-size: 11px;
 }
 
+/* ---------------------------------------------------------------- media */
+
+.p-clip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 6px;
+  color: var(--fg-dim);
+}
+
+.p-media {
+  display: flex;
+  gap: 10px;
+  /* One band, scrolled sideways — wrapping would push the body off the pane. */
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+/* Only ruled off from the body when there is a body to rule it off from. */
+.p-media + pre {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+/* Slightly tighter than the editor's: the pane is half the width and has to
+   leave room for the body underneath. */
+.p-media .a-tile {
+  width: 96px;
+}
+
+.p-media .a-frame {
+  height: 66px;
+}
+
 /* ------------------------------------------------- non-macOS fallback */
 
 /* No NSVisualEffectView outside macOS, so paint the surface ourselves. The

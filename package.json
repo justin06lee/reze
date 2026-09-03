@@ -11,10 +11,11 @@
     "icons": "rsvg-convert -w 1024 -h 1024 assets/icon.svg -o assets/icon-1024.png && rsvg-convert -w 72 -h 72 assets/tray.svg -o src-tauri/icons/tray.png && tauri icon assets/icon-1024.png && rm -rf src-tauri/icons/ios src-tauri/icons/android"
   },
   "dependencies": {
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-dialog": "^2.7.3",
+    "@tauri-apps/plugin-opener": "^2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
     "@types/react": "^19.1.8",

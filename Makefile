@@ -16,8 +16,11 @@ install:
 
 update: all
 
+# The executable inside the bundle is `reze`, which is the name the process
+# actually has — `pkill -x Reze` matches nothing and silently leaves the old
+# copy running against a bundle we are about to replace.
 stop:
-	-pkill -x $(APP)
+	-pkill -x reze
 
 # macOS ties the Accessibility grant to the binary's signature, so every
 # ad-hoc rebuild invalidates it while the entry keeps looking ticked in

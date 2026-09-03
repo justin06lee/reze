@@ -4,7 +4,7 @@
 
 # Reze
 
-**A menu-bar app that turns short triggers into full prompts.**
+**A menu-bar app that turns short triggers into full prompts — and the images and video that go with them.**
 
 </div>
 
@@ -135,14 +135,79 @@ global shortcut swallows that key in *every* application.
 | `esc` | Back out of fill-in, or close |
 
 The tray icon opens the macro editor, where you can add, edit, tag, duplicate
-and delete macros, rebind the hotkeys, change how expansions are delivered, and
-set Reze to start at login.
+and delete macros, [attach files](#attachments) to them, rebind the hotkeys,
+change how expansions are delivered, and set Reze to start at login.
 
 ### Quitting
 
 Use **Quit Reze** in the tray menu, or `⌘Q` with the editor focused. A menu-bar
 app has no application menu, so `⌘Q` has nothing to hang off by default — the
 editor window handles it itself. `⌘W` there closes the window without quitting.
+
+## Attachments
+
+A macro can carry files as well as text — a screenshot, a reference video, a
+PDF, anything. Trigger it and they arrive in whatever app you were in, the same
+way the text does.
+
+Three ways to attach one, in the editor:
+
+- **Drop it** anywhere on the window.
+- **`⌘V`** with a file or an image copied. Reze reads the real pasteboard rather
+  than what the web view saw, so a file copied in Finder works as well as a
+  screenshot taken with `⌘⇧4`.
+- **Add file…** for the ordinary file picker.
+
+Dropping onto an empty editor with nothing selected makes a new macro named
+after the file, rather than refusing the drop.
+
+### How they are delivered
+
+A clipboard holds one payload, so a macro carrying both takes two passes:
+**the text first, then the files.** That leaves the text landing exactly where a
+text-only macro would put it — surrounding characters and all — and the
+attachments follow. In a chat composer they drop into the attachment tray; in a
+document they land after the paragraph.
+
+`⌘↵` copies instead of pasting, and can only copy one thing: the text if there
+is any, otherwise the files.
+
+Images go on the clipboard as the file *and* as the picture, so an app that
+inlines images gets one without reading the file, and an app that wants a file
+gets a real one. Everything else goes as a file.
+
+This part is macOS-only — there is no portable notion of "the clipboard holds
+these three files", and the X11 answer is a different protocol again. Elsewhere
+the text is still delivered and the attachments are reported as skipped.
+
+### Where they live
+
+Alongside the library, in `~/.reze/assets/`, under a generated name that
+`macros.json` refers to:
+
+```jsonc
+"attachments": [
+  {
+    "id": "…",
+    "file": "a1b2c3d4-….png",   // the name inside ~/.reze/assets
+    "name": "Screenshot.png",   // what it was called when it came in
+    "kind": "image",            // image | video | audio | file
+    "mime": "image/png",
+    "bytes": 261314
+  }
+]
+```
+
+Files are **copied in**, not linked, so a macro keeps working after the
+screenshot it was made from is thrown away and the whole `~/.reze` directory
+stays portable between machines.
+
+Files no macro refers to any more are deleted after a save in the app — never
+after an edit you make to `macros.json` yourself, because a text editor
+mid-write can momentarily look like a library with no macros in it, and
+sweeping on that would take every attachment with it. Anything imported in the
+last minute is spared regardless, since a dropped file exists for a moment
+before the macro that references it is written.
 
 ## Template syntax
 
@@ -183,6 +248,7 @@ the change on next read. Diff it, commit it, sync it however you like.
       "description": "Deep end-to-end read of a codebase",
       "tags": ["review"],
       "body": "{{> rigor}}\n\nFully and thoroughly analyze {{target|this codebase}}…",
+      "attachments": [], // see Attachments
       "usageCount": 0
     }
   ]
@@ -242,6 +308,8 @@ bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/b
 - `assets/icon.svg`, `assets/tray.svg` — icon sources (see below)
 - `src-tauri/src/store.rs` — the JSON library, its schema, and the seed macros
 - `src-tauri/src/paste.rs` — clipboard + synthesized keystrokes, and the permission check
+- `src-tauri/src/assets.rs` — the attachment library on disk (`cargo test`)
+- `src-tauri/src/clip.rs` — the pasteboard, for everything that is not text
 - `src-tauri/src/expand.rs` — which trigger the typed words name (`cargo test`)
 - `src-tauri/src/typed.rs` — the keystroke tap behind terminal support
 - `src-tauri/src/focus.rs` — remembering who had focus, and pasteboard change detection
@@ -249,6 +317,7 @@ bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/b
 - `src-tauri/src/lib.rs` — windows, tray, global hotkeys, file watcher, IPC commands
 - `src/lib/template.ts` — the template language (variables, includes, built-ins)
 - `src/lib/fuzzy.ts` — the palette's ranking
+- `src/Attachments.tsx` — attachment previews, shared by both windows
 - `src/Palette.tsx`, `src/Editor.tsx` — the two windows, routed by window label
 
 Both windows load the same bundle; `main.tsx` picks a component from

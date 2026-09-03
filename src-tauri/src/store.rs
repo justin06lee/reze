@@ -4,6 +4,7 @@
 //! It is watched for external edits so hand-editing in a text editor and
 //! editing in the app both work, and neither clobbers the other.
 
+use crate::assets::Attachment;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -22,6 +23,10 @@ pub struct Macro {
     pub tags: Vec<String>,
     /// The expansion. May contain `{{vars}}` and `{{> includes}}`.
     pub body: String,
+    /// Files pasted along with the body — images, video, anything. Defaulted so
+    /// libraries written before attachments existed still load.
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
     #[serde(default)]
     pub usage_count: u64,
 }
@@ -150,6 +155,7 @@ fn m(name: &str, description: &str, tags: &[&str], body: &str) -> Macro {
         description: description.into(),
         tags: tags.iter().map(|s| s.to_string()).collect(),
         body: body.trim().into(),
+        attachments: Vec::new(),
         usage_count: 0,
     }
 }

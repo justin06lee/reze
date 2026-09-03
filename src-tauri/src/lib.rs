@@ -1,3 +1,5 @@
+mod assets;
+mod clip;
 mod expand;
 mod focus;
 mod login;
@@ -5,6 +7,7 @@ mod paste;
 mod store;
 mod typed;
 
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::mpsc::channel;
 use std::time::Duration;
@@ -43,6 +46,9 @@ fn save_library(
 ) -> Result<(), String> {
     let written = store::save(&library)?;
     *state.last_written.lock().unwrap() = written;
+    // Saving is the only moment the set of referenced files can shrink, so it is
+    // the only moment worth looking for orphans.
+    assets::sweep(&library);
     app.emit("library-changed", &library).ok();
     Ok(())
 }
@@ -101,9 +107,89 @@ fn open_accessibility_settings() {
     }
 }
 
-/// Hide the palette, then deliver `text` to whatever app regained focus.
+// ------------------------------------------------------------ attachments
+
+/// Where attachment files live, so the frontend can build `asset://` URLs for
+/// its previews. A directory rather than a URL per file: the stored name is
+/// already all the library carries, and joining it here would mean a round trip
+/// per thumbnail.
 #[tauri::command]
-async fn deliver(app: AppHandle, text: String, copy_only: bool) -> Result<(), String> {
+fn assets_dir() -> String {
+    assets::assets_dir().to_string_lossy().to_string()
+}
+
+/// Copy files at `paths` into the asset library. Used by the file picker and by
+/// files dropped onto the editor window.
+///
+/// Partial success is the useful behaviour: dropping ten files of which one is a
+/// folder should attach the nine, not refuse all of them. Anything skipped comes
+/// back in `errors` so the editor can say what happened rather than silently
+/// attaching fewer things than were dropped.
+#[tauri::command]
+fn import_files(paths: Vec<String>) -> Imported {
+    let mut out = Imported::default();
+    for path in paths {
+        match assets::import_path(std::path::Path::new(&path)) {
+            Ok(a) => out.attachments.push(a),
+            Err(e) => out.errors.push(e),
+        }
+    }
+    out
+}
+
+/// Turn whatever media is on the clipboard into attachments.
+///
+/// Read natively rather than from the webview's `paste` event: a file copied in
+/// Finder reaches the real pasteboard as a URL and the webview as nothing at
+/// all, and a screenshot arrives as data the webview may or may not hand over.
+#[tauri::command]
+fn import_clipboard() -> Imported {
+    let mut out = Imported::default();
+    for item in clip::read_media() {
+        let result = match item {
+            clip::Incoming::File(path) => assets::import_path(&path),
+            clip::Incoming::Data { mime, bytes } => {
+                let ext = assets::ext_for_mime(&mime);
+                // Nothing on the pasteboard carries a filename, so give it one
+                // that says where it came from.
+                assets::import_bytes(&format!("Clipboard.{ext}"), ext, &bytes)
+            }
+        };
+        match result {
+            Ok(a) => out.attachments.push(a),
+            Err(e) => out.errors.push(e),
+        }
+    }
+    out
+}
+
+/// The outcome of an import: what made it in, and why anything else did not.
+#[derive(Default, serde::Serialize)]
+struct Imported {
+    attachments: Vec<assets::Attachment>,
+    errors: Vec<String>,
+}
+
+/// Resolve stored attachment names to real paths, dropping any that no longer
+/// exist. A file deleted out from under the library must not fail the whole
+/// paste — the text half is still worth delivering.
+fn attachment_paths(files: &[String]) -> Vec<PathBuf> {
+    files
+        .iter()
+        .filter_map(|f| assets::path_for(f).ok())
+        .filter(|p| p.exists())
+        .collect()
+}
+
+/// Hide the palette, then deliver `text` and `attachments` to whatever app
+/// regained focus.
+#[tauri::command]
+async fn deliver(
+    app: AppHandle,
+    text: String,
+    copy_only: bool,
+    attachments: Vec<String>,
+) -> Result<(), String> {
     // Checked before hiding, not inside the worker: an error raised after the
     // window is gone is an error the user never sees. Missing Accessibility is
     // the single most likely failure — and it silently recurs after every
@@ -111,6 +197,8 @@ async fn deliver(app: AppHandle, text: String, copy_only: bool) -> Result<(), St
     if !copy_only && !paste::has_accessibility() {
         return Err("accessibility-denied".into());
     }
+
+    let files = attachment_paths(&attachments);
 
     if let Some(win) = app.get_webview_window(PALETTE) {
         let _ = win.hide();
@@ -135,9 +223,9 @@ async fn deliver(app: AppHandle, text: String, copy_only: bool) -> Result<(), St
     let worker = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         if copy_only {
-            paste::write_clipboard(&text)
+            paste::copy_only(&text, &files)
         } else {
-            paste::paste(&text, restore, |f| {
+            paste::paste(&text, &files, restore, |f| {
                 on_main(&worker, f).and_then(|inner| inner)
             })
         }
@@ -554,6 +642,7 @@ fn spawn_watcher(app: AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -595,12 +684,27 @@ pub fn run() {
             set_hotkeys,
             library_path,
             reveal_library,
+            assets_dir,
+            import_files,
+            import_clipboard,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let handle = app.handle().clone();
+
+            // Attachment previews are drawn straight from disk over `asset://`.
+            // Granted here rather than as a config glob because the directory
+            // hangs off the real home directory, which only the running process
+            // can resolve without guessing.
+            {
+                let dir = assets::assets_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                if let Err(e) = handle.asset_protocol_scope().allow_directory(&dir, false) {
+                    eprintln!("reze: attachment previews unavailable ({e})");
+                }
+            }
 
             let lib = store::load().unwrap_or_default();
             if let Ok(body) = store::serialize(&lib) {

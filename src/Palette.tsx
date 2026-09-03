@@ -11,7 +11,8 @@ import {
   type Variable,
 } from "./lib/template";
 import { useLibrary } from "./lib/useLibrary";
-import type { Macro } from "./lib/types";
+import { AttachmentTile, ClipIcon } from "./Attachments";
+import type { Attachment, Macro } from "./lib/types";
 import "./palette.css";
 
 type Stage = "search" | "fill";
@@ -108,15 +109,16 @@ export default function Palette() {
   const current = results[selected]?.macro ?? null;
 
   const send = useCallback(
-    async (body: string, copyOnly: boolean, macroId?: string) => {
+    async (body: string, copyOnly: boolean, macro?: Macro) => {
       // An in-place expansion replaces a whole selection, so the text either
       // side of the trigger goes back exactly as it was.
       const affix = affixRef.current;
       const text = affix ? affix.head + body + affix.tail : body;
+      const files = macro?.attachments.map((a) => a.file) ?? [];
       try {
         // "Copy only" is either an explicit ⌘↵ or the global preference.
-        await api.deliver(text, copyOnly || library?.settings.pasteMode === "copy");
-        if (macroId) api.bumpUsage(macroId).catch(() => {});
+        await api.deliver(text, copyOnly || library?.settings.pasteMode === "copy", files);
+        if (macro) api.bumpUsage(macro.id).catch(() => {});
         reset();
       } catch (e) {
         // The one failure worth explaining in place: without Accessibility the
@@ -149,7 +151,7 @@ export default function Palette() {
         ? await api.readClipboard().catch(() => "")
         : "";
       const filled = render(text, builtinValues(builtinsUsed(text), clipboard));
-      await send(filled, copyOnly, macro.id);
+      await send(filled, copyOnly, macro);
     },
     [macros, send],
   );
@@ -164,7 +166,7 @@ export default function Palette() {
         ...values,
         ...builtinValues(builtinsUsed(expanded), clipboard),
       });
-      await send(filled, copyOnly, active.id);
+      await send(filled, copyOnly, active);
     },
     [active, expanded, values, send],
   );
@@ -247,6 +249,9 @@ export default function Palette() {
     return expandIncludes(current.body, macros).text;
   }, [stage, expanded, values, current, macros]);
 
+  // Whichever macro the preview pane is describing, so its files show alongside.
+  const shown = stage === "fill" ? active : current;
+
   return (
     <div className="palette" ref={rootRef} onKeyDown={onKeyDown}>
       {stage === "search" ? (
@@ -291,15 +296,24 @@ export default function Palette() {
                 <span className="p-name">
                   <Highlight text={macro.name} indices={indices} />
                 </span>
-                {macro.tags.length > 0 && (
-                  <span className="p-tags">{macro.tags.map((t) => `#${t}`).join(" ")}</span>
+                {(macro.tags.length > 0 || macro.attachments.length > 0) && (
+                  <span className="p-tags">
+                    {macro.attachments.length > 0 && (
+                      <span className="p-clip">
+                        <ClipIcon />
+                        {macro.attachments.length}
+                      </span>
+                    )}
+                    {macro.tags.map((t) => `#${t}`).join(" ")}
+                  </span>
                 )}
               </li>
             ))}
           </ul>
           <div className="p-preview">
             {current?.description && <div className="p-desc">{current.description}</div>}
-            <pre>{preview}</pre>
+            <MediaStrip attachments={shown?.attachments ?? []} />
+            {preview && <pre>{preview}</pre>}
           </div>
         </div>
       )}
@@ -321,7 +335,8 @@ export default function Palette() {
             ))}
           </div>
           <div className="p-preview">
-            <pre>{preview}</pre>
+            <MediaStrip attachments={shown?.attachments ?? []} />
+            {preview && <pre>{preview}</pre>}
           </div>
         </div>
       )}
@@ -331,7 +346,7 @@ export default function Palette() {
           <kbd>↵</kbd> {stage === "fill" ? "paste" : "select"}
         </span>
         <span>
-          <kbd>⌘↵</kbd> copy only
+          <kbd>⌘↵</kbd> {shown?.attachments.length && !preview ? "copy file" : "copy only"}
         </span>
         <span>
           <kbd>esc</kbd> {stage === "fill" ? "back" : "close"}
@@ -341,6 +356,29 @@ export default function Palette() {
           Edit macros
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The files a macro will paste.
+ *
+ * Above the body rather than after it: a body runs to hundreds of words and the
+ * pane scrolls, so anything below it is invisible until you scroll — and the
+ * files are the part you cannot infer from the trigger name. Thumbnails rather
+ * than full previews for the same reason: this is a chooser, and one band of
+ * them still leaves the body visible underneath.
+ *
+ * Read-only and non-interactive: the palette closes the instant it loses focus,
+ * so a video you could scrub would be a video you could never finish scrubbing.
+ */
+function MediaStrip({ attachments }: { attachments: Attachment[] }) {
+  if (attachments.length === 0) return null;
+  return (
+    <div className="p-media">
+      {attachments.map((a) => (
+        <AttachmentTile key={a.id} attachment={a} />
+      ))}
     </div>
   );
 }

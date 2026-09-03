@@ -539,3 +539,83 @@
 html[data-platform="other"] .e-titlebar {
   padding-left: 14px;
 }
+
+/* ------------------------------------------------------------ attachments */
+
+.e-attachments {
+  flex: none;
+  padding: 10px 16px 0;
+  border-top: 1px solid var(--line);
+}
+
+.e-attachments-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-faint);
+}
+
+.e-attachments-head span {
+  flex: 1;
+}
+
+.e-attachments-head em {
+  font-style: normal;
+  color: var(--fg-dim);
+}
+
+.e-attachments-head button {
+  background: var(--bg-input);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 3px 9px;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+.e-attachments-head button:hover {
+  color: var(--fg);
+}
+
+.e-tiles {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 10px 0 4px;
+}
+
+.e-attachments-empty {
+  margin: 8px 0 4px;
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  max-width: 60ch;
+}
+
+/* Covers the whole window while files hover over it — Tauri handles the drag
+   natively, so there is no element to highlight and no drop target to aim at. */
+.e-drop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.42);
+  z-index: 10;
+  pointer-events: none;
+}
+
+.e-drop-card {
+  padding: 18px 30px;
+  border-radius: 12px;
+  border: 2px dashed var(--accent);
+  background: var(--bg-raised);
+  color: var(--fg);
+  font-size: 14px;
+  font-weight: 500;
+}
