@@ -269,132 +269,101 @@ fn grab_tools() -> grab::Tools {
 ///
 /// Not just politeness: `gallery-dl` is identified by which files appeared in
 /// the folder while it ran, and two overlapping downloads would each claim the
-/// other's.
+/// other's. It doubles as the "do not hide the palette" flag — a window that
+/// vanished mid-download would take the naming step with it.
 #[derive(Default)]
-struct Grabbing(AtomicBool);
+pub struct Grabbing(AtomicBool);
 
-/// What the grab is doing, for the tray item and both windows.
-#[derive(Clone, serde::Serialize)]
+/// A finished download, ready to be previewed and named.
+#[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GrabStatus {
-    /// "working", "done" or "failed" — the shape of the message, for styling.
-    state: &'static str,
-    message: String,
+struct Grabbed {
+    /// Where it landed. Handed back so the rename knows what to move.
+    path: String,
+    /// What to put in the naming field: the filename without its extension.
+    suggested_name: String,
+    /// So the palette can preview it with the same component as everything else.
+    attachment: assets::Attachment,
 }
 
+/// Download whatever `url` points at into the first watched folder.
+///
+/// Awaited by the palette rather than fired and forgotten, because the whole
+/// point of doing this from the palette is that there is somewhere to show
+/// progress and somewhere to ask what to call the result.
 #[tauri::command]
-fn grab_now(app: AppHandle) {
-    start_grab(&app);
-}
-
-/// Download whatever the URL on the clipboard points at, into the first
-/// watched folder — where the scan turns it into a macro on its own.
-fn start_grab(app: &AppHandle) {
-    if app
-        .state::<Grabbing>()
-        .0
-        .swap(true, Ordering::SeqCst)
-    {
-        report_grab(app, "working", "Already grabbing something.".into());
-        return;
+async fn grab_url(app: AppHandle, url: String) -> Result<Grabbed, String> {
+    if app.state::<Grabbing>().0.swap(true, Ordering::SeqCst) {
+        return Err("Already downloading something.".into());
     }
-
-    let app = app.clone();
-    std::thread::spawn(move || {
-        let outcome = run_grab(&app);
-        app.state::<Grabbing>().0.store(false, Ordering::SeqCst);
-
-        match outcome {
-            Ok(message) => {
-                report_grab(&app, "done", message);
-                // The file is in a watched folder, so it is already a macro —
-                // but the watcher debounce means telling the windows now is
-                // what makes it feel immediate.
-                if let Ok(library) = merged() {
-                    let _ = app.emit("library-changed", &library);
-                }
-            }
-            Err(e) => report_grab(&app, "failed", e),
+    // A guard rather than clearing at each exit: `?` below must not leave the
+    // flag set, or grabbing would be dead for the rest of the session.
+    struct Release(AppHandle);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.state::<Grabbing>().0.store(false, Ordering::SeqCst);
         }
-    });
-}
-
-fn run_grab(app: &AppHandle) -> Result<String, String> {
-    let url = paste::read_clipboard()?;
-    let url = url.trim().to_string();
-    if url.is_empty() {
-        return Err("Nothing on the clipboard — copy the link to a post first.".into());
     }
-
-    // Shown before the work starts, because the work is the slow part and a
-    // hotkey that appears to do nothing for thirty seconds is a broken hotkey.
-    report_grab(app, "working", format!("Grabbing {}…", host_of(&url)));
+    let _release = Release(app.clone());
 
     let library = store::load()?;
     let dir = folders::download_dir(&library.settings.folders)?;
-    let grabbed = grab::grab(&url, &dir)?;
+    // `download_dir` creates the folder if it was missing, and a folder that did
+    // not exist at launch is neither watched nor allowed to be previewed. This is
+    // the one moment that set can change by our own doing, so re-point both.
+    watch_folders(&app, &library.settings.folders);
 
-    Ok(format!(
-        "Grabbed {}",
-        grabbed
+    let result = tauri::async_runtime::spawn_blocking(move || grab::grab(&url, &dir))
+        .await
+        .map_err(|e| e.to_string())??;
+
+    let bytes = std::fs::metadata(&result.path).map(|m| m.len()).unwrap_or(0);
+    let grabbed = Grabbed {
+        suggested_name: result
             .path
-            .file_name()
+            .file_stem()
             .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| grabbed.via.to_string()),
-    ))
-}
+            .unwrap_or_default(),
+        attachment: assets::referencing(&result.path, bytes),
+        path: result.path.to_string_lossy().to_string(),
+    };
 
-/// Just the host, for a status line that has to fit in a menu item.
-fn host_of(url: &str) -> String {
-    url.split_once("://")
-        .map(|(_, rest)| rest.split('/').next().unwrap_or(rest))
-        .unwrap_or(url)
-        .trim_start_matches("www.")
-        .to_string()
-}
-
-/// Put a grab's progress everywhere it can be seen.
-///
-/// A menu-bar app has no window to speak through — the hotkey is pressed while
-/// the user is in another app entirely — so this goes three places at once: the
-/// tray menu, a system notification, and both windows for whichever is open.
-fn report_grab(app: &AppHandle, state: &'static str, message: String) {
-    if let Some(item) = app.state::<TrayStatus>().0.lock().unwrap().as_ref() {
-        let _ = item.set_text(&message);
+    // It is already a macro — the folder watcher will say so too, but not for
+    // another few hundred milliseconds, and the palette is showing it now.
+    if let Ok(library) = merged() {
+        let _ = app.emit("library-changed", &library);
     }
-    let _ = app.emit(
-        "grab-status",
-        GrabStatus {
-            state,
-            message: message.clone(),
-        },
-    );
-    // Only the outcomes: a banner for "starting…" followed by one for "done"
-    // is twice as much interruption as the news is worth.
-    if state != "working" {
-        notify(&message);
+    Ok(grabbed)
+}
+
+/// Rename a just-grabbed file, which is what renames the macro made from it.
+#[tauri::command]
+fn rename_grab(app: AppHandle, path: String, name: String) -> Result<String, String> {
+    let from = PathBuf::from(&path);
+    let parent = from.parent().ok_or("that file has nowhere to live")?;
+
+    // The path came from us a moment ago, but it arrives back over IPC, so it
+    // is checked rather than trusted: renaming is only ever allowed inside a
+    // folder the user asked us to watch.
+    let watched = folders::existing(&store::load()?.settings.folders);
+    if !watched.iter().any(|dir| parent.starts_with(dir)) {
+        return Err("that file is not in a watched folder".into());
     }
+
+    let extension = from
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let to = grab::unique_named(parent, &name, &extension);
+    if to != from {
+        std::fs::rename(&from, &to).map_err(|e| format!("renaming: {e}"))?;
+    }
+
+    if let Ok(library) = merged() {
+        let _ = app.emit("library-changed", &library);
+    }
+    Ok(to.to_string_lossy().to_string())
 }
-
-/// A system notification banner.
-#[cfg(target_os = "macos")]
-fn notify(message: &str) {
-    // Quotes are the only thing that can break out of the AppleScript string.
-    let escaped = message.replace('\\', "\\\\").replace('"', "\\\"");
-    let _ = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(format!(
-            "display notification \"{escaped}\" with title \"Reze\""
-        ))
-        .spawn();
-}
-
-#[cfg(not(target_os = "macos"))]
-fn notify(_message: &str) {}
-
-/// The tray menu's first item, which doubles as the grab's status line.
-#[derive(Default)]
-struct TrayStatus(Mutex<Option<MenuItem<tauri::Wry>>>);
 
 /// Hide the palette, then deliver `text` and `attachments` to whatever app
 /// regained focus.
@@ -522,12 +491,11 @@ fn resize_palette(app: AppHandle, height: f64) {
 struct Hotkeys {
     palette: Mutex<Option<Shortcut>>,
     expand: Mutex<Option<Shortcut>>,
-    grab: Mutex<Option<Shortcut>>,
 }
 
 #[tauri::command]
-fn set_hotkeys(app: AppHandle, palette: String, expand: String, grab: String) -> Result<(), String> {
-    register_hotkeys(&app, &palette, &expand, &grab)
+fn set_hotkeys(app: AppHandle, palette: String, expand: String) -> Result<(), String> {
+    register_hotkeys(&app, &palette, &expand)
 }
 
 /// Registers both shortcuts, replacing whatever was registered before.
@@ -535,27 +503,17 @@ fn set_hotkeys(app: AppHandle, palette: String, expand: String, grab: String) ->
 /// Parsed up front so an invalid accelerator is rejected before we tear down
 /// the working ones — otherwise a typo in Settings would leave the user with
 /// no way to open the app at all.
-fn register_hotkeys(
-    app: &AppHandle,
-    palette: &str,
-    expand: &str,
-    grab: &str,
-) -> Result<(), String> {
+fn register_hotkeys(app: &AppHandle, palette: &str, expand: &str) -> Result<(), String> {
     let palette_shortcut =
         Shortcut::from_str(palette).map_err(|e| format!("invalid palette hotkey: {e}"))?;
     let expand_shortcut =
         Shortcut::from_str(expand).map_err(|e| format!("invalid expand hotkey: {e}"))?;
-    let grab_shortcut = Shortcut::from_str(grab).map_err(|e| format!("invalid grab hotkey: {e}"))?;
 
     app.global_shortcut()
         .unregister_all()
         .map_err(|e| e.to_string())?;
 
-    for (accelerator, shortcut) in [
-        (palette, palette_shortcut),
-        (expand, expand_shortcut),
-        (grab, grab_shortcut),
-    ] {
+    for (accelerator, shortcut) in [(palette, palette_shortcut), (expand, expand_shortcut)] {
         app.global_shortcut()
             .register(shortcut)
             .map_err(|e| format!("could not register {accelerator}: {e}"))?;
@@ -564,7 +522,6 @@ fn register_hotkeys(
     let state = app.state::<Hotkeys>();
     *state.palette.lock().unwrap() = Some(palette_shortcut);
     *state.expand.lock().unwrap() = Some(expand_shortcut);
-    *state.grab.lock().unwrap() = Some(grab_shortcut);
     Ok(())
 }
 
@@ -942,8 +899,6 @@ pub fn run() {
                         expand_in_place(app);
                     } else if is(&hotkeys.palette) {
                         toggle_palette(app);
-                    } else if is(&hotkeys.grab) {
-                        start_grab(app);
                     }
                 })
                 .build(),
@@ -951,7 +906,6 @@ pub fn run() {
         .manage(AppState::new())
         .manage(Hotkeys::default())
         .manage(Grabbing::default())
-        .manage(TrayStatus::default())
         .manage(FolderWatch::default())
         .invoke_handler(tauri::generate_handler![
             get_library,
@@ -979,7 +933,8 @@ pub fn run() {
             set_folders,
             reveal_path,
             grab_tools,
-            grab_now,
+            grab_url,
+            rename_grab,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -1004,12 +959,9 @@ pub fn run() {
                 *app.state::<AppState>().last_written.lock().unwrap() = body;
             }
 
-            if let Err(e) = register_hotkeys(
-                &handle,
-                &lib.settings.hotkey,
-                &lib.settings.expand_hotkey,
-                &lib.settings.grab_hotkey,
-            ) {
+            if let Err(e) =
+                register_hotkeys(&handle, &lib.settings.hotkey, &lib.settings.expand_hotkey)
+            {
                 eprintln!("reze: {e}");
             }
 
@@ -1022,38 +974,13 @@ pub fn run() {
                 }
             }
 
-            // Disabled, so it reads as a label rather than something to click.
-            // A menu-bar app's only permanent surface is this menu, which makes
-            // it the honest place for "what did that hotkey just do".
-            let status_item =
-                MenuItem::with_id(app, "status", "Ready", false, None::<&str>)?;
-            let grab_item = MenuItem::with_id(
-                app,
-                "grab",
-                "Grab Link on Clipboard",
-                true,
-                None::<&str>,
-            )?;
             let open_item = MenuItem::with_id(app, "open", "Macro Editor…", true, None::<&str>)?;
             let palette_item =
                 MenuItem::with_id(app, "palette", "Show Palette", true, None::<&str>)?;
             let quit_item =
                 MenuItem::with_id(app, "quit", "Quit Reze", true, Some("CmdOrCtrl+Q"))?;
             let sep = PredefinedMenuItem::separator(app)?;
-            let sep2 = PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(
-                app,
-                &[
-                    &status_item,
-                    &sep,
-                    &palette_item,
-                    &grab_item,
-                    &open_item,
-                    &sep2,
-                    &quit_item,
-                ],
-            )?;
-            *app.state::<TrayStatus>().0.lock().unwrap() = Some(status_item);
+            let menu = Menu::with_items(app, &[&palette_item, &open_item, &sep, &quit_item])?;
 
             // macOS gets a monochrome template glyph, which the system tints to
             // match the menu bar. Nothing else has template images, so a black
@@ -1071,7 +998,6 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "open" => show_editor(app),
                     "palette" => toggle_palette(app),
-                    "grab" => start_grab(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -1090,15 +1016,19 @@ pub fn run() {
                 );
             }
 
+            folders::ensure_ours(&lib.settings.folders);
             watch_folders(&handle, &lib.settings.folders);
             spawn_watcher(handle);
             Ok(())
         })
         .on_window_event(|window, event| match event {
             // The palette is a transient overlay: losing focus means the user
-            // moved on, so get out of the way.
+            // moved on, so get out of the way — unless a download is running in
+            // it, which would take the progress and the naming step with it.
             WindowEvent::Focused(false) if window.label() == PALETTE => {
-                let _ = window.hide();
+                if !window.state::<Grabbing>().0.load(Ordering::SeqCst) {
+                    let _ = window.hide();
+                }
             }
             // Closing either window should not tear down the menu-bar app.
             WindowEvent::CloseRequested { api, .. } => {

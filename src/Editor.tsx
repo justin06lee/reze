@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "./lib/api";
 import { AttachmentMedia, AttachmentTile, ClipIcon } from "./Attachments";
@@ -11,7 +10,6 @@ import { useLibrary } from "./lib/useLibrary";
 import {
   emptyMacro,
   formatBytes,
-  type GrabStatus,
   type GrabTools,
   type HotkeySlot,
   type Imported,
@@ -35,7 +33,6 @@ export default function Editor() {
   // itself. Tauri handles the drag natively, so there is no HTML drag event.
   const [dropping, setDropping] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [grab, setGrab] = useState<GrabStatus | null>(null);
 
   const saveTimer = useRef<number | null>(null);
   const armTimer = useRef<number | null>(null);
@@ -255,29 +252,6 @@ export default function Editor() {
   }, []);
 
   /**
-   * How a grab is going.
-   *
-   * The hotkey is pressed in another app entirely, so the tray item and a
-   * notification carry it — but if this window happens to be open it is the
-   * best place to show a failure, because a failure is usually several lines of
-   * a tool explaining itself.
-   */
-  useEffect(() => {
-    const un = listen<GrabStatus>("grab-status", (e) => {
-      setGrab(e.payload);
-      // A finished grab is news for a moment, not a banner to dismiss. A
-      // failure stays until it is read.
-      if (e.payload.state === "done") {
-        const done = e.payload;
-        setTimeout(() => setGrab((g) => (g === done ? null : g)), 6000);
-      }
-    });
-    return () => {
-      un.then((f) => f());
-    };
-  }, []);
-
-  /**
    * ⌘V with files on the clipboard.
    *
    * The event only tells us files are *there*; the bytes come from reading the
@@ -385,14 +359,6 @@ export default function Editor() {
         </div>
       )}
 
-      {grab && (
-        <div className="e-banner" data-grab={grab.state}>
-          <div className="e-grab-message">{grab.message}</div>
-          <div className="e-banner-actions">
-            <button onClick={() => setGrab(null)}>Dismiss</button>
-          </div>
-        </div>
-      )}
 
       {showSettings ? (
         <SettingsPane library={library} update={update} />
@@ -678,7 +644,7 @@ function SettingsPane({
       // Register before saving: if the combination is already taken by another
       // app, the old one keeps working and nothing is written.
       api
-        .setHotkeys(next.hotkey, next.expandHotkey, next.grabHotkey)
+        .setHotkeys(next.hotkey, next.expandHotkey)
         .then(() => {
           setHotkeyError(null);
           update({ ...library, settings: next });
@@ -753,7 +719,7 @@ function SettingsPane({
 
       <FoldersSection library={library} />
 
-      <GrabSection recorder={recorder} />
+      <GrabSection />
 
       <section>
         <h2>Delivery</h2>
@@ -893,7 +859,7 @@ function FoldersSection({ library }: { library: Library }) {
  * The tools are looked up rather than bundled, so this section's real job is to
  * say plainly which of them are missing and what to type to get them.
  */
-function GrabSection({ recorder }: { recorder: (slot: HotkeySlot) => React.ReactNode }) {
+function GrabSection() {
   const [tools, setTools] = useState<GrabTools | null>(null);
 
   useEffect(() => {
@@ -915,18 +881,13 @@ function GrabSection({ recorder }: { recorder: (slot: HotkeySlot) => React.React
 
   return (
     <section>
-      <h2>Grab from a link</h2>
+      <h2>Downloading a link</h2>
       <p>
-        Copy the URL of a post — YouTube, X, Instagram, Reddit, TikTok, or a link straight to
-        an image — and press this. Whatever the post is made of is downloaded into the first
-        watched folder above and named after where it came from, which makes it a macro a
-        moment later.
+        Paste the URL of a post — YouTube, X, Instagram, Reddit, TikTok, or a link straight to
+        an image — into the palette instead of a search. Reze recognises it, downloads whatever
+        the post is made of into the first folder above, and asks what to call it. It is a
+        macro the moment you press return.
       </p>
-      {recorder("grabHotkey")}
-
-      <div className="e-row">
-        <button onClick={() => api.grabNow()}>Grab what is on the clipboard</button>
-      </div>
 
       {tools && (
         <ul className="e-tools">

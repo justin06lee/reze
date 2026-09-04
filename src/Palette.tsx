@@ -11,13 +11,22 @@ import {
   type Variable,
 } from "./lib/template";
 import { useLibrary } from "./lib/useLibrary";
-import { AttachmentTile, ClipIcon } from "./Attachments";
-import type { Attachment, Macro } from "./lib/types";
+import { AttachmentMedia, AttachmentTile, ClipIcon } from "./Attachments";
+import type { Attachment, Grabbed, GrabTools, Macro } from "./lib/types";
 import "./palette.css";
 
-type Stage = "search" | "fill";
+type Stage = "search" | "fill" | "naming";
 
 type Ranked = { macro: Macro; indices: number[] };
+
+/**
+ * A whole query that is nothing but a web link.
+ *
+ * Anchored deliberately: a macro body can mention a URL, and a trigger could
+ * contain one. Only a query that *is* a link means "download this", so the
+ * search never gets hijacked by a word that happens to look like an address.
+ */
+const LINK = /^https?:\/\/\S+$/i;
 
 export default function Palette() {
   const { library } = useLibrary();
@@ -32,6 +41,13 @@ export default function Palette() {
   const [values, setValues] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
 
+  // The download flow: a link pasted into the search field, the wait, and the
+  // chance to name what came back before it becomes a macro.
+  const [grabbing, setGrabbing] = useState(false);
+  const [grabbed, setGrabbed] = useState<Grabbed | null>(null);
+  const [grabName, setGrabName] = useState("");
+  const [tools, setTools] = useState<GrabTools | null>(null);
+
   // Set when an in-place expansion is in flight: the characters either side of
   // the trigger that Rust selected, which must be put back around the
   // expansion. A ref rather than state because `choose` reads it in the same
@@ -40,6 +56,7 @@ export default function Palette() {
 
   const rootRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
   const firstFieldRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
@@ -51,6 +68,8 @@ export default function Palette() {
     setActive(null);
     setValues({});
     setError(null);
+    setGrabbed(null);
+    setGrabName("");
     requestAnimationFrame(() => searchRef.current?.focus());
   }, []);
 
@@ -171,10 +190,60 @@ export default function Palette() {
     [active, expanded, values, send],
   );
 
+  const link = query.trim();
+  const isLink = LINK.test(link);
+
+  // Checked only once a link is actually in the box, so the ordinary path never
+  // pays for it — and re-checked each time, since installing a tool while the
+  // app runs should not need a restart.
+  useEffect(() => {
+    if (!isLink || tools) return;
+    api.grabTools().then(setTools).catch(() => {});
+  }, [isLink, tools]);
+
+  const startGrab = useCallback(async () => {
+    setError(null);
+    setGrabbing(true);
+    try {
+      const result = await api.grabUrl(link);
+      setGrabbed(result);
+      setGrabName(result.suggestedName);
+      setStage("naming");
+      // Selected rather than merely focused: the offered name is usually right,
+      // so typing should replace it and Enter alone should accept it.
+      requestAnimationFrame(() => nameRef.current?.select());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setGrabbing(false);
+    }
+  }, [link]);
+
+  /** Accept the name and close. The file is already a macro either way. */
+  const submitName = useCallback(async () => {
+    if (!grabbed) return;
+    const name = grabName.trim();
+    if (name && name !== grabbed.suggestedName) {
+      try {
+        await api.renameGrab(grabbed.path, name);
+      } catch (e) {
+        setError(String(e));
+        return; // stay, so the name can be fixed rather than silently lost
+      }
+    }
+    reset();
+    api.hidePalette();
+  }, [grabbed, grabName, reset]);
+
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
       e.preventDefault();
-      if (stage === "fill") {
+      // Leaving during a download abandons the naming step, not the download —
+      // it finishes in the background and keeps the name it was given.
+      if (stage === "naming" || grabbing) {
+        reset();
+        api.hidePalette();
+      } else if (stage === "fill") {
         // Backing out of an in-place expansion abandons it — the caret is
         // already back in the other app.
         affixRef.current = null;
@@ -187,10 +256,28 @@ export default function Palette() {
       return;
     }
 
+    if (stage === "naming") {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitName();
+      }
+      return;
+    }
+
     if (stage === "fill") {
       if (e.key === "Enter") {
         e.preventDefault();
         submitFilled(e.metaKey || e.ctrlKey);
+      }
+      return;
+    }
+
+    // A link in the box means one action, so the list keys have nothing to move
+    // through and Enter means download rather than expand.
+    if (isLink) {
+      if (e.key === "Enter" && !grabbing) {
+        e.preventDefault();
+        startGrab();
       }
       return;
     }
@@ -254,7 +341,12 @@ export default function Palette() {
 
   return (
     <div className="palette" ref={rootRef} onKeyDown={onKeyDown}>
-      {stage === "search" ? (
+      {stage === "naming" ? (
+        <div className="p-search p-search--fill">
+          <span className="p-back">↓</span>
+          <span className="p-fill-title">Downloaded</span>
+        </div>
+      ) : stage === "search" ? (
         <div className="p-search">
           <SearchIcon />
           <input
@@ -265,7 +357,7 @@ export default function Palette() {
             spellCheck={false}
             autoComplete="off"
           />
-          {query && <kbd className="p-count">{results.length}</kbd>}
+          {query && !isLink && <kbd className="p-count">{results.length}</kbd>}
         </div>
       ) : (
         <div className="p-search p-search--fill">
@@ -276,14 +368,43 @@ export default function Palette() {
 
       {error && <div className="p-error">{error}</div>}
 
-      {stage === "search" && results.length === 0 && (
+      {stage === "search" && isLink && (
+        <GrabPanel link={link} grabbing={grabbing} tools={tools} />
+      )}
+
+      {stage === "naming" && grabbed && (
+        <div className="p-body p-body--naming">
+          <div className="p-name-fields">
+            <label>
+              <span>Call it</span>
+              <input
+                ref={nameRef}
+                value={grabName}
+                onChange={(e) => setGrabName(e.target.value)}
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </label>
+            <p className="p-name-note">
+              This renames the file, which is what the macro is named after.
+            </p>
+          </div>
+          <div className="p-preview">
+            <div className="p-name-preview">
+              <AttachmentMedia attachment={grabbed.attachment} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {stage === "search" && !isLink && results.length === 0 && (
         <div className="p-empty">
           {macros.length === 0 ? "No macros yet." : "Nothing matches."}
           <button onClick={() => api.openEditor()}>Open editor</button>
         </div>
       )}
 
-      {stage === "search" && results.length > 0 && (
+      {stage === "search" && !isLink && results.length > 0 && (
         <div className="p-body">
           <ul className="p-list" ref={listRef}>
             {results.map(({ macro, indices }, i) => (
@@ -342,15 +463,32 @@ export default function Palette() {
       )}
 
       <div className="p-footer">
-        <span>
-          <kbd>↵</kbd> {stage === "fill" ? "paste" : "select"}
-        </span>
-        <span>
-          <kbd>⌘↵</kbd> {shown?.attachments.length && !preview ? "copy file" : "copy only"}
-        </span>
-        <span>
-          <kbd>esc</kbd> {stage === "fill" ? "back" : "close"}
-        </span>
+        {stage === "naming" ? (
+          <>
+            <span>
+              <kbd>↵</kbd> save
+            </span>
+            <span>
+              <kbd>esc</kbd> keep this name
+            </span>
+          </>
+        ) : isLink ? (
+          <span>
+            <kbd>↵</kbd> {grabbing ? "downloading…" : "download"}
+          </span>
+        ) : (
+          <>
+            <span>
+              <kbd>↵</kbd> {stage === "fill" ? "paste" : "select"}
+            </span>
+            <span>
+              <kbd>⌘↵</kbd> {shown?.attachments.length && !preview ? "copy file" : "copy only"}
+            </span>
+            <span>
+              <kbd>esc</kbd> {stage === "fill" ? "back" : "close"}
+            </span>
+          </>
+        )}
         <span className="p-spacer" />
         <button className="p-link" onClick={() => api.openEditor()}>
           Edit macros
@@ -372,6 +510,54 @@ export default function Palette() {
  * Read-only and non-interactive: the palette closes the instant it loses focus,
  * so a video you could scrub would be a video you could never finish scrubbing.
  */
+/**
+ * What the palette shows once the query turns out to be a link.
+ *
+ * The missing-tool warning is up front rather than after a failed download: the
+ * check is instant and the download is not, and being told thirty seconds in
+ * that nothing was ever going to work is the worse order.
+ */
+function GrabPanel({
+  link,
+  grabbing,
+  tools,
+}: {
+  link: string;
+  grabbing: boolean;
+  tools: GrabTools | null;
+}) {
+  let host = link;
+  try {
+    host = new URL(link).host.replace(/^www\./, "");
+  } catch {
+    // Not worth surfacing — the field still shows the link itself below.
+  }
+
+  return (
+    <div className="p-grab">
+      <div className="p-grab-main">
+        <span className="p-grab-title">
+          {grabbing ? `Downloading from ${host}…` : `Download from ${host}`}
+        </span>
+        <span className="p-grab-url">{link}</span>
+      </div>
+
+      {grabbing && (
+        <div className="p-grab-bar" aria-hidden>
+          <span />
+        </div>
+      )}
+
+      {!grabbing && tools && !tools.ytDlp && !tools.galleryDl && (
+        <p className="p-grab-warn">
+          Needs <code>yt-dlp</code> for video and <code>gallery-dl</code> for images —
+          <code>brew install yt-dlp gallery-dl</code>
+        </p>
+      )}
+    </div>
+  );
+}
+
 function MediaStrip({ attachments }: { attachments: Attachment[] }) {
   if (attachments.length === 0) return null;
   return (

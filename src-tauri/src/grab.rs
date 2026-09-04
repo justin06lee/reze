@@ -101,8 +101,6 @@ fn expand_home(path: &str) -> String {
 /// What a grab produced.
 pub struct Grabbed {
     pub path: PathBuf,
-    /// How it was fetched, for the status line: "yt-dlp", "gallery-dl", "direct".
-    pub via: &'static str,
 }
 
 /// Download whatever `url` points at into `dir`.
@@ -127,7 +125,7 @@ pub fn grab(url: &str, dir: &Path) -> Result<Grabbed, String> {
     // Video first: it is what most links are, and yt-dlp knows the most sites.
     if let Some(bin) = &tools.yt_dlp {
         match run_yt_dlp(bin, tools.ffmpeg.as_deref(), url, dir) {
-            Ok(path) => return Ok(Grabbed { path, via: "yt-dlp" }),
+            Ok(path) => return Ok(Grabbed { path }),
             Err(e) => problems.push(e),
         }
     }
@@ -137,12 +135,7 @@ pub fn grab(url: &str, dir: &Path) -> Result<Grabbed, String> {
     // rather than on the wording of that message, which is not an API.
     if let Some(bin) = &tools.gallery_dl {
         match run_gallery_dl(bin, url, dir) {
-            Ok(path) => {
-                return Ok(Grabbed {
-                    path,
-                    via: "gallery-dl",
-                })
-            }
+            Ok(path) => return Ok(Grabbed { path }),
             Err(e) => problems.push(e),
         }
     }
@@ -209,10 +202,7 @@ fn download_direct(url: &str, dir: &Path, name: &str) -> Result<Grabbed, String>
         let _ = std::fs::remove_file(&dest);
         return Err(format!("Could not download that file.\n\n{}", status.1));
     }
-    Ok(Grabbed {
-        path: dest,
-        via: "direct",
-    })
+    Ok(Grabbed { path: dest })
 }
 
 fn run_yt_dlp(bin: &str, ffmpeg: Option<&str>, url: &str, dir: &Path) -> Result<PathBuf, String> {
@@ -220,12 +210,18 @@ fn run_yt_dlp(bin: &str, ffmpeg: Option<&str>, url: &str, dir: &Path) -> Result<
     cmd.arg("--no-playlist") // a link with `&list=` means that video, not the playlist
         .arg("--no-progress")
         .arg("--no-warnings")
-        // Prefer mp4/m4a over whatever is technically best. The point of a grab
-        // is to paste the result into something else, and webm is refused or
-        // silently ignored by most of macOS — Messages, Notes, Keynote, Slack.
-        // The trailing alternatives mean a site that has no mp4 still works.
+        // Prefer H.264 in mp4 over whatever is technically best. The point of a
+        // grab is to paste the result into something else, and macOS decodes
+        // H.264 everywhere while webm is refused outright and AV1 — which is
+        // *also* mp4, so asking for the container alone is not enough — plays
+        // in almost nothing, including the preview in this app. Each
+        // alternative after the first loosens one constraint, so a site that
+        // offers none of it still yields a file.
         .arg("--format")
-        .arg("bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b")
+        .arg(
+            "bv*[vcodec^=avc1][ext=mp4]+ba[ext=m4a]/b[vcodec^=avc1][ext=mp4]\
+             /bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+        )
         .arg("--merge-output-format")
         .arg("mp4")
         // Trims the whole name rather than one field, so the extension survives.
@@ -348,21 +344,30 @@ fn run(cmd: &mut Command, name: &str) -> Result<(bool, String), String> {
 
 /// A path in `dir` for `name` that is not already taken.
 fn unique(dir: &Path, name: &str) -> PathBuf {
-    let candidate = dir.join(name);
+    match name.rsplit_once('.') {
+        Some((stem, ext)) => unique_named(dir, stem, &format!(".{ext}")),
+        None => unique_named(dir, name, ""),
+    }
+}
+
+/// A free path in `dir` for `stem` + `extension`, sanitizing the stem first.
+///
+/// Public because renaming a grab lands here too: the name then comes from a
+/// text field rather than a URL, which is if anything more reason to run it
+/// through [`sanitize`].
+pub fn unique_named(dir: &Path, stem: &str, extension: &str) -> PathBuf {
+    let stem = sanitize(stem);
+    let candidate = dir.join(format!("{stem}{extension}"));
     if !candidate.exists() {
         return candidate;
     }
-    let (stem, ext) = match name.rsplit_once('.') {
-        Some((s, e)) => (s.to_string(), format!(".{e}")),
-        None => (name.to_string(), String::new()),
-    };
     for n in 2..1000 {
-        let candidate = dir.join(format!("{stem} ({n}){ext}"));
+        let candidate = dir.join(format!("{stem} ({n}){extension}"));
         if !candidate.exists() {
             return candidate;
         }
     }
-    dir.join(format!("{stem} ({}){ext}", uuid::Uuid::new_v4()))
+    dir.join(format!("{stem} ({}){extension}", uuid::Uuid::new_v4()))
 }
 
 /// Strip what a filename cannot contain. Deliberately narrow — the whole point
@@ -471,6 +476,37 @@ mod tests {
             let dir = Path::new("/tmp/reze");
             assert_eq!(dir.join(&safe).parent(), Some(dir), "{hostile:?} escaped");
         }
+    }
+
+    #[test]
+    fn renaming_sanitizes_and_keeps_the_extension() {
+        // The rename path takes its name from a text field rather than a URL,
+        // so this is the boundary that stops a typed "../" from moving a file
+        // out of the watched folder.
+        let dir = std::env::temp_dir().join(format!("reze-rename-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let plain = unique_named(&dir, "my clip", ".mp4");
+        assert_eq!(plain, dir.join("my clip.mp4"));
+
+        let hostile = unique_named(&dir, "../../escape", ".mp4");
+        assert_eq!(hostile.parent(), Some(dir.as_path()), "a rename left the folder");
+        assert!(hostile.extension().is_some(), "the extension was lost");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn renaming_onto_a_taken_name_does_not_clobber_it() {
+        let dir = std::env::temp_dir().join(format!("reze-rename2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("taken.mp4"), b"keep me").unwrap();
+
+        let next = unique_named(&dir, "taken", ".mp4");
+
+        assert_eq!(next, dir.join("taken (2).mp4"));
+        assert_eq!(std::fs::read(dir.join("taken.mp4")).unwrap(), b"keep me");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

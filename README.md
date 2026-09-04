@@ -134,8 +134,8 @@ global shortcut swallows that key in *every* application.
 | `⌘↵` | Put the expansion on the clipboard instead of pasting |
 | `esc` | Back out of fill-in, or close |
 
-And one that never opens anything: `⌥⇧D` downloads whatever the link on your
-clipboard points at. See [Grabbing a link](#grabbing-a-link).
+Paste a **link** into the search field instead of a search and it turns into a
+download. See [Pasting a link](#pasting-a-link).
 
 The tray icon opens the macro editor, where you can add, edit, tag, duplicate
 and delete macros, [attach files](#attachments) to them, rebind the hotkeys,
@@ -249,27 +249,51 @@ Dotfiles are skipped, subfolders are followed eight deep, and the scan stops at
 two thousand files so that pointing this at a home directory degrades rather
 than hangs.
 
-## Grabbing a link
+## Pasting a link
 
-Copy the URL of a post, press `⌥⇧D`, and whatever the post is made of is
-downloaded into the first watched folder — which makes it a macro a moment
-later, with no editor and no window.
+Open the palette and paste the URL of a post where you would type a search.
+Reze recognises that it is a link rather than a query and offers to download it
+instead:
 
 ```
-   copy https://www.youtube.com/watch?v=…
-              ⌥⇧D
-   ~/.reze/media/youtube - jawed - Me at the zoo.mp4
-              ↓
-   a macro called "youtube - jawed - Me at the zoo"
+┌──────────────────────────────────────────────────────────────┐
+│ 🔍  https://www.youtube.com/watch?v=…                        │
+├──────────────────────────────────────────────────────────────┤
+│ Download from youtube.com                                    │
+│ https://www.youtube.com/watch?v=…                            │
+└──────────────────────────────────────────────────────────────┘
+  ↵ download
 ```
 
-Names come from the post: the site, who posted it, and the title. That is the
-whole point — a folder of `video.mp4` and `image.jpg` would be useless a week
-later.
+`↵` downloads it into the first watched folder. When it lands, the palette asks
+what to call it, with the name it worked out already filled in and selected —
+so `↵` again accepts it, or type over it first:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ ↓  Downloaded                                                │
+├──────────────────────────┬───────────────────────────────────┤
+│ CALL IT                  │                                   │
+│ ┌──────────────────────┐ │         ▶                         │
+│ │ youtube - jawed - Me…│ │                                   │
+│ └──────────────────────┘ │                                   │
+└──────────────────────────┴───────────────────────────────────┘
+  ↵ save   esc keep this name
+```
+
+The name you give it renames the file, and the file is what the macro is named
+after — so it is a macro called exactly that, immediately.
+
+Names are worked out from the post: the site, who posted it, and the title.
+That is the point — a folder of `video.mp4` and `image.jpg` would be useless a
+week later.
+
+`esc` during a download leaves the naming step, not the download: it finishes
+in the background and keeps the name it was given.
 
 ### What it uses
 
-Nothing is bundled. Three tools are looked for, and **Settings → Grab from a
+Nothing is bundled. Three tools are looked for, and **Settings → Downloading a
 link** says which are present and what to type for the rest:
 
 | Tool | For | Without it |
@@ -289,8 +313,9 @@ that has none of them in it.
 A link straight to a file — `…/photo.png` — skips all three and is fetched with
 `curl`, so that much works with nothing installed.
 
-Video is asked for as mp4 where the site offers it, since webm is refused or
-silently ignored by most of macOS.
+Video is asked for as **H.264 in mp4** where the site offers it. Asking for the
+container alone is not enough: AV1 is also mp4, and macOS plays almost none of
+it — not in Messages, not in Keynote, not in this app's own preview.
 
 ### What it will not do
 
@@ -327,7 +352,6 @@ the change on next read. Diff it, commit it, sync it however you like.
   "settings": {
     "hotkey": "CmdOrCtrl+Shift+Space",
     "expandHotkey": "Alt+Space", // expand the trigger at the caret
-    "grabHotkey": "Alt+Shift+D", // download the link on the clipboard
     "folders": ["~/.reze/media"],// every file in these becomes a macro
     "trackTyping": true,         // needed for expansion inside terminals
     "pasteMode": "paste",        // or "copy" to never paste directly

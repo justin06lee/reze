@@ -50,20 +50,13 @@ pub struct Settings {
     /// where the text in front of the caret cannot be selected and read back.
     #[serde(default = "default_true")]
     pub track_typing: bool,
-    /// Turns the URL on the clipboard into a downloaded file. See [`crate::grab`].
-    #[serde(default = "default_grab_hotkey")]
-    pub grab_hotkey: String,
     /// Folders whose files become macros on their own. See [`crate::folders`].
-    /// Grabbed media lands in the first one.
+    /// A link pasted into the palette is downloaded into the first one.
     #[serde(default = "default_folders")]
     pub folders: Vec<String>,
     /// "paste" simulates Cmd+V into the previous app; "copy" only fills the clipboard.
     pub paste_mode: String,
     pub restore_clipboard: bool,
-}
-
-fn default_grab_hotkey() -> String {
-    "Alt+Shift+D".into()
 }
 
 /// Seeded rather than left empty so grabbing works the moment it is pressed,
@@ -86,7 +79,6 @@ impl Default for Settings {
         Self {
             hotkey: "CmdOrCtrl+Shift+Space".into(),
             expand_hotkey: default_expand_hotkey(),
-            grab_hotkey: default_grab_hotkey(),
             folders: default_folders(),
             track_typing: true,
             paste_mode: "paste".into(),

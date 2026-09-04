@@ -130,6 +130,24 @@ fn shellexpand_home(path: &str) -> String {
     format!("{}{}", home.display(), rest)
 }
 
+/// Create any configured folder that lives inside `~/.reze`.
+///
+/// Only ours: the default folder ships in the settings but nothing has made it
+/// yet, and a folder that does not exist is not watched and has no preview
+/// scope — so a first run would need a restart before the folder it came with
+/// worked. A folder the *user* chose is deliberately not created, because the
+/// usual reason one is missing is an external drive that is not plugged in, and
+/// conjuring an empty directory at its mount point is the wrong answer.
+pub fn ensure_ours(folders: &[String]) {
+    let ours = crate::store::config_dir();
+    for folder in folders {
+        let path = PathBuf::from(shellexpand_home(folder));
+        if path.starts_with(&ours) {
+            let _ = std::fs::create_dir_all(&path);
+        }
+    }
+}
+
 /// The folders that actually exist, expanded — what the watcher should watch.
 pub fn existing(folders: &[String]) -> Vec<PathBuf> {
     folders

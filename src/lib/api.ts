@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   Attachment,
+  Grabbed,
   GrabTools,
   Imported,
   Library,
@@ -38,8 +39,8 @@ export const showPalette = () => invoke<void>("show_palette");
 export const openEditor = () => invoke<void>("open_editor");
 export const quit = () => invoke<void>("quit");
 export const resizePalette = (height: number) => invoke<void>("resize_palette", { height });
-export const setHotkeys = (palette: string, expand: string, grab: string) =>
-  invoke<void>("set_hotkeys", { palette, expand, grab });
+export const setHotkeys = (palette: string, expand: string) =>
+  invoke<void>("set_hotkeys", { palette, expand });
 export const libraryPath = () => invoke<string>("library_path");
 export const revealLibrary = () => invoke<void>("reveal_library");
 export const revealPath = (path: string) => invoke<void>("reveal_path", { path });
@@ -48,8 +49,16 @@ export const revealPath = (path: string) => invoke<void>("reveal_path", { path }
 export const setFolders = (folders: string[]) => invoke<void>("set_folders", { folders });
 
 export const grabTools = () => invoke<GrabTools>("grab_tools");
-/** Download whatever the URL on the clipboard points at. Returns immediately. */
-export const grabNow = () => invoke<void>("grab_now");
+
+/**
+ * Download `url` into the first watched folder. Resolves when it has finished,
+ * which for a video is tens of seconds — the caller is expected to show that.
+ */
+export const grabUrl = (url: string) => invoke<Grabbed>("grab_url", { url });
+
+/** Rename a just-grabbed file, which renames the macro made from it. */
+export const renameGrab = (path: string, name: string) =>
+  invoke<string>("rename_grab", { path, name });
 
 /**
  * Where attachment files live on disk.

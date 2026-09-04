@@ -57,9 +57,7 @@ export type Settings = {
   hotkey: string;
   /** Expands the trigger already typed at the caret, with no window. */
   expandHotkey: string;
-  /** Downloads whatever the URL on the clipboard points at. */
-  grabHotkey: string;
-  /** Folders whose files become macros. Grabs land in the first. */
+  /** Folders whose files become macros. Downloads land in the first. */
   folders: string[];
   /** Watch typing so expand-in-place works in terminals and TUIs. */
   trackTyping: boolean;
@@ -82,9 +80,13 @@ export type GrabTools = {
   ffmpeg: string | null;
 };
 
-export type GrabStatus = {
-  state: "working" | "done" | "failed";
-  message: string;
+/** A finished download, waiting to be named. */
+export type Grabbed = {
+  /** Where it landed, so the rename knows what to move. */
+  path: string;
+  /** The filename without its extension, to prefill the naming field. */
+  suggestedName: string;
+  attachment: Attachment;
 };
 
 export const emptyMacro = (): Macro => ({
@@ -98,7 +100,7 @@ export const emptyMacro = (): Macro => ({
 });
 
 /** The hotkey slots Settings can rebind. */
-export type HotkeySlot = "hotkey" | "expandHotkey" | "grabHotkey";
+export type HotkeySlot = "hotkey" | "expandHotkey";
 
 /** What an import produced, and why anything else was skipped. */
 export type Imported = {

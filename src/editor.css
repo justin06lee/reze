@@ -801,19 +801,3 @@ html[data-platform="other"] .e-titlebar {
   color: var(--fg-faint);
   font-size: 11px;
 }
-
-/* A failed grab is a tool explaining itself, which is usually several lines. */
-.e-grab-message {
-  white-space: pre-wrap;
-  max-height: 8em;
-  overflow-y: auto;
-  font-size: 12px;
-}
-
-.e-banner[data-grab="failed"] {
-  background: rgba(255, 80, 80, 0.15);
-}
-
-.e-banner[data-grab="done"] {
-  background: rgba(63, 185, 80, 0.15);
-}
