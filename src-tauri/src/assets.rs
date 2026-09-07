@@ -68,13 +68,19 @@ pub fn resolve(attachment: &Attachment) -> Result<PathBuf, String> {
 /// a plain file name is refused outright rather than normalised, because there
 /// is no legitimate reason for one to appear.
 pub fn path_for(file: &str) -> Result<PathBuf, String> {
+    bare_name(&assets_dir(), file)
+}
+
+/// The same check, against any directory we own — the clipboard history keeps
+/// its images the same way, and its index is just as hand-editable.
+pub fn bare_name(dir: &Path, file: &str) -> Result<PathBuf, String> {
     let bare = Path::new(file);
     let mut parts = bare.components();
     let valid = matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none();
     if !valid || file.is_empty() {
-        return Err(format!("{file:?} is not an attachment name"));
+        return Err(format!("{file:?} is not a file name"));
     }
-    Ok(assets_dir().join(file))
+    Ok(dir.join(file))
 }
 
 /// Copy a file on disk into the assets directory.

@@ -4,6 +4,7 @@ mod expand;
 mod focus;
 mod folders;
 mod grab;
+mod history;
 mod login;
 mod paste;
 mod store;
@@ -76,6 +77,7 @@ fn save_library(
     if previous_folders != library.settings.folders {
         watch_folders(&app, &library.settings.folders);
     }
+    history::configure(&library.settings);
 
     // Hand back the merged view, not what was written — the windows must not
     // lose their folder macros just because they saved an edit to another one.
@@ -365,6 +367,34 @@ fn rename_grab(app: AppHandle, path: String, name: String) -> Result<String, Str
     Ok(to.to_string_lossy().to_string())
 }
 
+// ------------------------------------------------------- clipboard history
+
+/// Everything remembered, newest first — previews only; see [`history::View`].
+#[tauri::command]
+fn clipboard_history() -> Vec<history::View> {
+    history::views()
+}
+
+/// Where remembered images and app icons live, for the same reason
+/// [`assets_dir`] exists: the entries carry bare names, and the previews are
+/// drawn straight off disk.
+#[tauri::command]
+fn clipboard_dir() -> String {
+    history::clip_dir().to_string_lossy().to_string()
+}
+
+#[tauri::command]
+fn forget_clip(app: AppHandle, id: String) {
+    history::remove(&id);
+    let _ = app.emit("clipboard-changed", history::views());
+}
+
+#[tauri::command]
+fn clear_clips(app: AppHandle) {
+    history::clear();
+    let _ = app.emit("clipboard-changed", history::views());
+}
+
 /// Hide the palette, then deliver `text` and `attachments` to whatever app
 /// regained focus.
 #[tauri::command]
@@ -374,6 +404,27 @@ async fn deliver(
     copy_only: bool,
     attachments: Vec<assets::Attachment>,
 ) -> Result<(), String> {
+    let files = attachment_paths(&attachments);
+    deliver_payload(app, paste::Payload::Bundle { text, files }, copy_only).await
+}
+
+/// Put a remembered clipboard entry back — the same delivery, from the other
+/// source. See [`history`].
+#[tauri::command]
+async fn deliver_clip(app: AppHandle, id: String, copy_only: bool) -> Result<(), String> {
+    // Resolved before the window goes: an entry whose file has been deleted
+    // since it was copied should say so while there is still something on
+    // screen to say it on.
+    let payload = history::payload_for(&id)?;
+    deliver_payload(app, payload, copy_only).await
+}
+
+/// Hide the palette, hand focus back, and paste.
+async fn deliver_payload(
+    app: AppHandle,
+    payload: paste::Payload,
+    copy_only: bool,
+) -> Result<(), String> {
     // Checked before hiding, not inside the worker: an error raised after the
     // window is gone is an error the user never sees. Missing Accessibility is
     // the single most likely failure — and it silently recurs after every
@@ -381,8 +432,6 @@ async fn deliver(
     if !copy_only && !paste::has_accessibility() {
         return Err("accessibility-denied".into());
     }
-
-    let files = attachment_paths(&attachments);
 
     if let Some(win) = app.get_webview_window(PALETTE) {
         let _ = win.hide();
@@ -406,10 +455,13 @@ async fn deliver(
 
     let worker = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        // Everything below writes to the pasteboard. Without this the history
+        // would fill up with Reze pasting on the user's behalf.
+        let _quiet = history::suspend();
         if copy_only {
-            paste::copy_only(&text, &files)
+            paste::copy_payload(&payload)
         } else {
-            paste::paste(&text, &files, restore, |f| {
+            paste::paste_payload(&payload, restore, |f| {
                 on_main(&worker, f).and_then(|inner| inner)
             })
         }
@@ -467,6 +519,26 @@ fn open_editor(app: AppHandle) {
     show_editor(&app);
 }
 
+/// Tell the backend the window switched between the macro list and the
+/// clipboard on its own, so the next hotkey press still knows whether it means
+/// "open the other one" or "close this".
+#[tauri::command]
+fn set_palette_mode(app: AppHandle, clipboard: bool) {
+    app.state::<PaletteMode>().0.store(clipboard, Ordering::SeqCst);
+}
+
+/// Which mode was last asked for.
+///
+/// Read once when the palette's JavaScript starts. Tauri events are not
+/// buffered, so a hotkey pressed in the second between the process starting and
+/// the web view attaching its listeners would otherwise open the window on the
+/// wrong thing — most likely right after logging in, which is exactly when the
+/// app has just started.
+#[tauri::command]
+fn palette_mode(app: AppHandle) -> bool {
+    app.state::<PaletteMode>().0.load(Ordering::SeqCst)
+}
+
 /// Quit for real. A menu-bar app has no application menu, so the usual ⌘Q has
 /// nothing to hang off — the windows provide it themselves.
 #[tauri::command]
@@ -491,11 +563,17 @@ fn resize_palette(app: AppHandle, height: f64) {
 struct Hotkeys {
     palette: Mutex<Option<Shortcut>>,
     expand: Mutex<Option<Shortcut>>,
+    clipboard: Mutex<Option<Shortcut>>,
 }
 
 #[tauri::command]
-fn set_hotkeys(app: AppHandle, palette: String, expand: String) -> Result<(), String> {
-    register_hotkeys(&app, &palette, &expand)
+fn set_hotkeys(
+    app: AppHandle,
+    palette: String,
+    expand: String,
+    clipboard: String,
+) -> Result<(), String> {
+    register_hotkeys(&app, &palette, &expand, &clipboard)
 }
 
 /// Registers both shortcuts, replacing whatever was registered before.
@@ -503,26 +581,46 @@ fn set_hotkeys(app: AppHandle, palette: String, expand: String) -> Result<(), St
 /// Parsed up front so an invalid accelerator is rejected before we tear down
 /// the working ones — otherwise a typo in Settings would leave the user with
 /// no way to open the app at all.
-fn register_hotkeys(app: &AppHandle, palette: &str, expand: &str) -> Result<(), String> {
-    let palette_shortcut =
-        Shortcut::from_str(palette).map_err(|e| format!("invalid palette hotkey: {e}"))?;
-    let expand_shortcut =
-        Shortcut::from_str(expand).map_err(|e| format!("invalid expand hotkey: {e}"))?;
+fn register_hotkeys(
+    app: &AppHandle,
+    palette: &str,
+    expand: &str,
+    clipboard: &str,
+) -> Result<(), String> {
+    let parse = |what: &str, accelerator: &str| {
+        Shortcut::from_str(accelerator).map_err(|e| format!("invalid {what} hotkey: {e}"))
+    };
+    let palette_shortcut = parse("palette", palette)?;
+    let expand_shortcut = parse("expand", expand)?;
+    let clipboard_shortcut = parse("clipboard", clipboard)?;
 
     app.global_shortcut()
         .unregister_all()
         .map_err(|e| e.to_string())?;
 
-    for (accelerator, shortcut) in [(palette, palette_shortcut), (expand, expand_shortcut)] {
-        app.global_shortcut()
-            .register(shortcut)
-            .map_err(|e| format!("could not register {accelerator}: {e}"))?;
+    // Every one is attempted even after a failure. A combination another app
+    // already owns is an ordinary thing to hit — ⌘⇧V especially — and having
+    // that take the *other* two hotkeys down with it would be absurd.
+    let mut refused = Vec::new();
+    for (accelerator, shortcut) in [
+        (palette, palette_shortcut),
+        (expand, expand_shortcut),
+        (clipboard, clipboard_shortcut),
+    ] {
+        if let Err(e) = app.global_shortcut().register(shortcut) {
+            refused.push(format!("{accelerator} ({e})"));
+        }
     }
 
     let state = app.state::<Hotkeys>();
     *state.palette.lock().unwrap() = Some(palette_shortcut);
     *state.expand.lock().unwrap() = Some(expand_shortcut);
-    Ok(())
+    *state.clipboard.lock().unwrap() = Some(clipboard_shortcut);
+
+    match refused.is_empty() {
+        true => Ok(()),
+        false => Err(format!("already taken: {}", refused.join(", "))),
+    }
 }
 
 #[tauri::command]
@@ -605,17 +703,48 @@ fn reveal_palette(app: &AppHandle) {
     let _ = win.set_focus();
 }
 
+/// Which of the two things the palette is currently showing.
+///
+/// Kept here rather than asked of the web view because both hotkeys have to
+/// decide *before* the window is touched whether this press means "open" or
+/// "close" — and a round trip to JavaScript to find out would show the window
+/// first and hide it a frame later.
+#[derive(Default)]
+struct PaletteMode(AtomicBool);
+
 fn toggle_palette(app: &AppHandle) {
     let Some(win) = app.get_webview_window(PALETTE) else {
         return;
     };
-    if win.is_visible().unwrap_or(false) {
+    let mode = app.state::<PaletteMode>();
+    if win.is_visible().unwrap_or(false) && !mode.0.load(Ordering::SeqCst) {
         let _ = win.hide();
         return;
     }
+    mode.0.store(false, Ordering::SeqCst);
     // Tell the UI to reset before it becomes visible, so the previous query
     // never flashes on screen.
     let _ = app.emit_to(PALETTE, "palette-opened", ());
+    reveal_palette(app);
+}
+
+/// The same window, opened onto the clipboard history instead.
+///
+/// A mode of the palette rather than a window of its own: it wants the same
+/// search field, the same list, the same preview pane, and above all the same
+/// careful business of handing focus back to the app you were in before
+/// pressing ⌘V for you. A second window would be all of that again.
+fn toggle_clipboard(app: &AppHandle) {
+    let Some(win) = app.get_webview_window(PALETTE) else {
+        return;
+    };
+    let mode = app.state::<PaletteMode>();
+    if win.is_visible().unwrap_or(false) && mode.0.load(Ordering::SeqCst) {
+        let _ = win.hide();
+        return;
+    }
+    mode.0.store(true, Ordering::SeqCst);
+    let _ = app.emit_to(PALETTE, "palette-clipboard", ());
     reveal_palette(app);
 }
 
@@ -684,6 +813,11 @@ fn run_expand(app: &AppHandle) -> Result<(), String> {
     // Fallback: select the words in front of the caret and read them back.
     // Needed when the buffer is cold — text typed before Reze started, or
     // pasted in rather than typed.
+    //
+    // From here to the end this borrows the clipboard and synthesizes a ⌘C, so
+    // the history is held quiet: the words in front of your caret are not
+    // something you copied.
+    let _quiet = history::suspend();
     let span = expand::words_to_select(&names);
 
     // Borrow the clipboard to read the text back, then hand it straight back to
@@ -897,6 +1031,8 @@ pub fn run() {
                     };
                     if is(&hotkeys.expand) {
                         expand_in_place(app);
+                    } else if is(&hotkeys.clipboard) {
+                        toggle_clipboard(app);
                     } else if is(&hotkeys.palette) {
                         toggle_palette(app);
                     }
@@ -907,6 +1043,7 @@ pub fn run() {
         .manage(Hotkeys::default())
         .manage(Grabbing::default())
         .manage(FolderWatch::default())
+        .manage(PaletteMode::default())
         .invoke_handler(tauri::generate_handler![
             get_library,
             save_library,
@@ -935,6 +1072,13 @@ pub fn run() {
             grab_tools,
             grab_url,
             rename_grab,
+            set_palette_mode,
+            palette_mode,
+            clipboard_history,
+            clipboard_dir,
+            forget_clip,
+            clear_clips,
+            deliver_clip,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -959,9 +1103,12 @@ pub fn run() {
                 *app.state::<AppState>().last_written.lock().unwrap() = body;
             }
 
-            if let Err(e) =
-                register_hotkeys(&handle, &lib.settings.hotkey, &lib.settings.expand_hotkey)
-            {
+            if let Err(e) = register_hotkeys(
+                &handle,
+                &lib.settings.hotkey,
+                &lib.settings.expand_hotkey,
+                &lib.settings.clipboard_hotkey,
+            ) {
                 eprintln!("reze: {e}");
             }
 
@@ -977,10 +1124,15 @@ pub fn run() {
             let open_item = MenuItem::with_id(app, "open", "Macro Editor…", true, None::<&str>)?;
             let palette_item =
                 MenuItem::with_id(app, "palette", "Show Palette", true, None::<&str>)?;
+            let clipboard_item =
+                MenuItem::with_id(app, "clipboard", "Clipboard History", true, None::<&str>)?;
             let quit_item =
                 MenuItem::with_id(app, "quit", "Quit Reze", true, Some("CmdOrCtrl+Q"))?;
             let sep = PredefinedMenuItem::separator(app)?;
-            let menu = Menu::with_items(app, &[&palette_item, &open_item, &sep, &quit_item])?;
+            let menu = Menu::with_items(
+                app,
+                &[&palette_item, &clipboard_item, &open_item, &sep, &quit_item],
+            )?;
 
             // macOS gets a monochrome template glyph, which the system tints to
             // match the menu bar. Nothing else has template images, so a black
@@ -998,6 +1150,7 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "open" => show_editor(app),
                     "palette" => toggle_palette(app),
+                    "clipboard" => toggle_clipboard(app),
                     "quit" => app.exit(0),
                     _ => {}
                 })
@@ -1015,6 +1168,18 @@ pub fn run() {
                     Some(PALETTE_CORNER_RADIUS),
                 );
             }
+
+            // Remembered images and the source-app icons are drawn the same
+            // way attachments are. Recursive: the icons sit in a subdirectory.
+            {
+                let dir = history::clip_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                if let Err(e) = handle.asset_protocol_scope().allow_directory(&dir, true) {
+                    eprintln!("reze: clipboard previews unavailable ({e})");
+                }
+            }
+            history::configure(&lib.settings);
+            history::start(handle.clone());
 
             folders::ensure_ours(&lib.settings.folders);
             watch_folders(&handle, &lib.settings.folders);

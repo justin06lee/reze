@@ -12,10 +12,11 @@ import {
 } from "./lib/template";
 import { useLibrary } from "./lib/useLibrary";
 import { AttachmentMedia, AttachmentTile, ClipIcon } from "./Attachments";
-import type { Attachment, Grabbed, GrabTools, Macro } from "./lib/types";
+import { ClipboardIcon, ClipPreview, ClipRow, useClips } from "./Clips";
+import type { Attachment, ClipEntry, Grabbed, GrabTools, Macro } from "./lib/types";
 import "./palette.css";
 
-type Stage = "search" | "fill" | "naming";
+type Stage = "search" | "fill" | "naming" | "clipboard";
 
 type Ranked = { macro: Macro; indices: number[] };
 
@@ -28,9 +29,18 @@ type Ranked = { macro: Macro; indices: number[] };
  */
 const LINK = /^https?:\/\/\S+$/i;
 
+/**
+ * The one failure worth explaining in place: without Accessibility the
+ * keystroke is swallowed by the OS and nothing at all happens. It also has to
+ * be re-granted after every update, which is otherwise baffling.
+ */
+const ACCESSIBILITY_NOTE =
+  "Accessibility permission is missing — macOS grants it per build, so a new version needs it again. Open the editor to fix.";
+
 export default function Palette() {
   const { library } = useLibrary();
   const macros = library?.macros ?? [];
+  const clips = useClips();
 
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
@@ -73,13 +83,46 @@ export default function Palette() {
     requestAnimationFrame(() => searchRef.current?.focus());
   }, []);
 
+  /** Come up on the clipboard rather than the macro list — the ⌘⇧V hotkey. */
+  const openClipboard = useCallback(() => {
+    reset();
+    setStage("clipboard");
+  }, [reset]);
+
+  /**
+   * Move between the macro list and the clipboard from inside the window.
+   *
+   * Told to the backend rather than kept here alone: both hotkeys decide
+   * whether a press means open or close before the window is touched, and they
+   * cannot ask the web view what it is showing without a visible flicker.
+   */
+  const switchTo = useCallback((next: Stage) => {
+    setQuery("");
+    setSelected(0);
+    setError(null);
+    setStage(next);
+    api.setPaletteMode(next === "clipboard").catch(() => {});
+    requestAnimationFrame(() => searchRef.current?.focus());
+  }, []);
+
   useEffect(() => {
     searchRef.current?.focus();
-    const un = listen("palette-opened", reset);
+    const opened = listen("palette-opened", reset);
+    const clipboard = listen("palette-clipboard", openClipboard);
+
+    // A hotkey pressed in the moment before those listeners existed emitted an
+    // event into nothing — events are not buffered — so ask outright which mode
+    // was asked for. Without this, ⌘⇧V a second after login opens the macros.
+    api
+      .paletteMode()
+      .then((wants) => wants && setStage("clipboard"))
+      .catch(() => {});
+
     return () => {
-      un.then((f) => f());
+      opened.then((f) => f());
+      clipboard.then((f) => f());
     };
-  }, [reset]);
+  }, [reset, openClipboard]);
 
   // Keep the native window exactly as tall as the content, so the blurred
   // surface never extends past what is drawn.
@@ -117,15 +160,42 @@ export default function Palette() {
       .map(({ macro, indices }) => ({ macro, indices }));
   }, [query, macros]);
 
-  useEffect(() => setSelected(0), [query]);
+  /**
+   * The clipboard list, filtered.
+   *
+   * Plain substring matching rather than the fuzzy matcher the macros use.
+   * Those are short deliberate names, where fuzziness is forgiving; a clipboard
+   * entry is up to eight hundred characters of arbitrary text, and a fuzzy
+   * match against that would find every entry for almost any query. Here you
+   * are looking for a word you know you copied.
+   */
+  const clipResults = useMemo<ClipEntry[]>(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return clips;
+    return clips.filter(
+      (c) =>
+        c.preview.toLowerCase().includes(needle) ||
+        (c.source?.name ?? "").toLowerCase().includes(needle),
+    );
+  }, [clips, query]);
+
+  const listLength = stage === "clipboard" ? clipResults.length : results.length;
+
+  useEffect(() => setSelected(0), [query, stage]);
+
+  // Deleting the last row must not leave the preview pane pointing past the end.
+  useEffect(() => {
+    setSelected((s) => (s > 0 && s >= listLength ? listLength - 1 : s));
+  }, [listLength]);
 
   useEffect(() => {
     listRef.current
       ?.querySelector('[data-selected="true"]')
       ?.scrollIntoView({ block: "nearest" });
-  }, [selected, results]);
+  }, [selected, results, clipResults]);
 
   const current = results[selected]?.macro ?? null;
+  const currentClip = stage === "clipboard" ? (clipResults[selected] ?? null) : null;
 
   const send = useCallback(
     async (body: string, copyOnly: boolean, macro?: Macro) => {
@@ -140,12 +210,9 @@ export default function Palette() {
         if (macro) api.bumpUsage(macro.id).catch(() => {});
         reset();
       } catch (e) {
-        // The one failure worth explaining in place: without Accessibility the
-        // keystroke is swallowed by the OS and nothing at all happens. It also
-        // has to be re-granted after every update, which is otherwise baffling.
         setError(
           String(e) === "accessibility-denied"
-            ? "Accessibility permission is missing — macOS grants it per build, so a new version needs it again. Open the editor to fix. ⌘↵ still copies."
+            ? `${ACCESSIBILITY_NOTE} ⌘↵ still copies.`
             : String(e),
         );
       }
@@ -190,8 +257,27 @@ export default function Palette() {
     [active, expanded, values, send],
   );
 
+  /** Put a remembered entry back into the app you were in. */
+  const pasteClip = useCallback(
+    async (entry: ClipEntry, copyOnly: boolean) => {
+      try {
+        await api.deliverClip(entry.id, copyOnly || library?.settings.pasteMode === "copy");
+        reset();
+      } catch (e) {
+        setError(
+          String(e) === "accessibility-denied"
+            ? `${ACCESSIBILITY_NOTE} ⌘↵ still copies.`
+            : String(e),
+        );
+      }
+    },
+    [library, reset],
+  );
+
   const link = query.trim();
-  const isLink = LINK.test(link);
+  // Only in the macro list: a link is a perfectly ordinary thing to have copied
+  // and then go looking for.
+  const isLink = stage === "search" && LINK.test(link);
 
   // Checked only once a link is actually in the box, so the ordinary path never
   // pays for it — and re-checked each time, since installing a tool while the
@@ -264,6 +350,27 @@ export default function Palette() {
       return;
     }
 
+    if (stage === "clipboard") {
+      const move = (delta: number) => {
+        e.preventDefault();
+        setSelected((s) =>
+          clipResults.length === 0 ? 0 : (s + delta + clipResults.length) % clipResults.length,
+        );
+      };
+      if (e.key === "ArrowDown" || (e.ctrlKey && e.key === "n")) move(1);
+      else if (e.key === "ArrowUp" || (e.ctrlKey && e.key === "p")) move(-1);
+      else if (e.key === "Enter" && currentClip) {
+        e.preventDefault();
+        pasteClip(currentClip, e.metaKey || e.ctrlKey);
+      } else if (e.key === "Backspace" && (e.metaKey || e.ctrlKey) && currentClip) {
+        // ⌘⌫ rather than ⌫ alone: the search field is focused, and a bare
+        // backspace there has to keep meaning "edit what I typed".
+        e.preventDefault();
+        api.forgetClip(currentClip.id).catch((err) => setError(String(err)));
+      }
+      return;
+    }
+
     if (stage === "fill") {
       if (e.key === "Enter") {
         e.preventDefault();
@@ -318,9 +425,7 @@ export default function Palette() {
       // "no macro matched" is an ordinary miss and stays quiet. A missing
       // permission is not — nothing will ever work until it is granted.
       if (e.payload !== "accessibility-denied") return;
-      setError(
-        "Accessibility permission is missing — macOS grants it per build, so a new version needs it again. Open the editor to fix.",
-      );
+      setError(ACCESSIBILITY_NOTE);
       api.showPalette().catch(() => {});
     });
 
@@ -346,23 +451,23 @@ export default function Palette() {
           <span className="p-back">↓</span>
           <span className="p-fill-title">Downloaded</span>
         </div>
-      ) : stage === "search" ? (
+      ) : stage === "fill" ? (
+        <div className="p-search p-search--fill">
+          <span className="p-back">↩</span>
+          <span className="p-fill-title">{active?.name}</span>
+        </div>
+      ) : (
         <div className="p-search">
-          <SearchIcon />
+          {stage === "clipboard" ? <ClipboardIcon /> : <SearchIcon />}
           <input
             ref={searchRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search macros…"
+            placeholder={stage === "clipboard" ? "Search clipboard…" : "Search macros…"}
             spellCheck={false}
             autoComplete="off"
           />
-          {query && !isLink && <kbd className="p-count">{results.length}</kbd>}
-        </div>
-      ) : (
-        <div className="p-search p-search--fill">
-          <span className="p-back">↩</span>
-          <span className="p-fill-title">{active?.name}</span>
+          {query && !isLink && <kbd className="p-count">{listLength}</kbd>}
         </div>
       )}
 
@@ -394,6 +499,38 @@ export default function Palette() {
               <AttachmentMedia attachment={grabbed.attachment} />
             </div>
           </div>
+        </div>
+      )}
+
+      {stage === "clipboard" && clips.length === 0 && (
+        <div className="c-empty">
+          Nothing copied yet.
+          <em>
+            Copy something in any app and it appears here, with the app it came from. Nothing
+            copied before Reze started is remembered.
+          </em>
+        </div>
+      )}
+
+      {stage === "clipboard" && clips.length > 0 && clipResults.length === 0 && (
+        <div className="p-empty">Nothing matches.</div>
+      )}
+
+      {stage === "clipboard" && clipResults.length > 0 && (
+        <div className="p-body p-body--clips">
+          <ul className="p-list p-list--clips" ref={listRef}>
+            {clipResults.map((entry, i) => (
+              <li
+                key={entry.id}
+                data-selected={i === selected}
+                onMouseMove={() => setSelected(i)}
+                onClick={() => pasteClip(entry, false)}
+              >
+                <ClipRow entry={entry} />
+              </li>
+            ))}
+          </ul>
+          <div className="p-preview">{currentClip && <ClipPreview entry={currentClip} />}</div>
         </div>
       )}
 
@@ -476,6 +613,21 @@ export default function Palette() {
           <span>
             <kbd>↵</kbd> {grabbing ? "downloading…" : "download"}
           </span>
+        ) : stage === "clipboard" ? (
+          <>
+            <span>
+              <kbd>↵</kbd> paste
+            </span>
+            <span>
+              <kbd>⌘↵</kbd> copy only
+            </span>
+            <span>
+              <kbd>⌘⌫</kbd> forget
+            </span>
+            <span>
+              <kbd>esc</kbd> close
+            </span>
+          </>
         ) : (
           <>
             <span>
@@ -490,6 +642,9 @@ export default function Palette() {
           </>
         )}
         <span className="p-spacer" />
+        <button className="p-link" onClick={() => switchTo(stage === "clipboard" ? "search" : "clipboard")}>
+          {stage === "clipboard" ? "Macros" : "Clipboard"}
+        </button>
         <button className="p-link" onClick={() => api.openEditor()}>
           Edit macros
         </button>

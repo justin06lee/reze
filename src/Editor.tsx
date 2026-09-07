@@ -644,7 +644,7 @@ function SettingsPane({
       // Register before saving: if the combination is already taken by another
       // app, the old one keeps working and nothing is written.
       api
-        .setHotkeys(next.hotkey, next.expandHotkey)
+        .setHotkeys(next.hotkey, next.expandHotkey, next.clipboardHotkey)
         .then(() => {
           setHotkeyError(null);
           update({ ...library, settings: next });
@@ -716,6 +716,8 @@ function SettingsPane({
         </label>
         <p className="e-note">Takes effect next time Reze starts.</p>
       </section>
+
+      <ClipboardSection library={library} update={update} recorder={recorder} />
 
       <FoldersSection library={library} />
 
@@ -789,6 +791,94 @@ function SettingsPane({
   );
 }
 
+
+/**
+ * Clipboard history.
+ *
+ * The one feature here that records something whether or not you asked it to in
+ * the moment, so it says plainly what it keeps and where — and offers the two
+ * things a person actually wants from that: a limit, and a way to wipe it.
+ */
+function ClipboardSection({
+  library,
+  update,
+  recorder,
+}: {
+  library: Library;
+  update: (next: Library) => void;
+  recorder: (slot: HotkeySlot) => React.ReactNode;
+}) {
+  const [armed, setArmed] = useState(false);
+  const [cleared, setCleared] = useState(false);
+  const s = library.settings;
+
+  const clear = async () => {
+    if (!armed) {
+      setArmed(true);
+      return;
+    }
+    await api.clearClips().catch(() => {});
+    setArmed(false);
+    setCleared(true);
+  };
+
+  return (
+    <section>
+      <h2>Clipboard history</h2>
+      <p>
+        Everything you copy, with the app you copied it from. Press this anywhere and pick one
+        to paste it back where your cursor is — text, images, and files all come back as what
+        they were.
+      </p>
+      {recorder("clipboardHotkey")}
+
+      <label className="e-check" style={{ marginTop: 16 }}>
+        <input
+          type="checkbox"
+          checked={s.clipboardHistory}
+          onChange={(e) =>
+            update({ ...library, settings: { ...s, clipboardHistory: e.target.checked } })
+          }
+        />
+        <span>
+          Remember what I copy
+          <em>
+            Kept in <code>~/.reze/clipboard.json</code> on this machine, in plain text —
+            nothing is sent anywhere. Apps that mark a copy as a password, and anything Reze
+            itself puts on the clipboard, are skipped. Turn this off and the list stops growing;
+            what is already in it stays until you clear it.
+          </em>
+        </span>
+      </label>
+
+      <div className="e-row">
+        <label className="e-limit">
+          <span>Keep</span>
+          <input
+            type="number"
+            min={1}
+            max={1000}
+            value={s.clipboardLimit}
+            onChange={(e) => {
+              const n = Number(e.target.value);
+              if (!Number.isFinite(n)) return;
+              update({
+                ...library,
+                settings: { ...s, clipboardLimit: Math.min(1000, Math.max(1, Math.round(n))) },
+              });
+            }}
+          />
+          <span>items</span>
+        </label>
+        <button className="e-danger" onClick={clear} data-armed={armed || undefined}>
+          {armed ? "Really forget everything?" : "Clear history"}
+        </button>
+        {armed && <button onClick={() => setArmed(false)}>Cancel</button>}
+        {cleared && !armed && <span className="e-badge">cleared</span>}
+      </div>
+    </section>
+  );
+}
 
 /**
  * Watched folders.
