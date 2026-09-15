@@ -321,7 +321,19 @@ export default function Palette() {
     api.hidePalette();
   }, [grabbed, grabName, reset]);
 
+  // Only the two lists: filling in values needs Tab to move between fields, and
+  // switching mid-download would strand the naming step behind the other list.
+  const tabSwitches = (stage === "search" || stage === "clipboard") && !grabbing;
+
   const onKeyDown = (e: React.KeyboardEvent) => {
+    // Either direction lands on the other list, so Shift is not asked about.
+    // Skipped while an input method is composing, which uses Tab to pick.
+    if (e.key === "Tab" && tabSwitches && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      switchTo(stage === "clipboard" ? "search" : "clipboard");
+      return;
+    }
+
     if (e.key === "Escape") {
       e.preventDefault();
       // Leaving during a download abandons the naming step, not the download —
@@ -643,7 +655,7 @@ export default function Palette() {
         )}
         <span className="p-spacer" />
         <button className="p-link" onClick={() => switchTo(stage === "clipboard" ? "search" : "clipboard")}>
-          {stage === "clipboard" ? "Macros" : "Clipboard"}
+          {tabSwitches && <kbd>tab</kbd>} {stage === "clipboard" ? "Macros" : "Clipboard"}
         </button>
         <button className="p-link" onClick={() => api.openEditor()}>
           Edit macros

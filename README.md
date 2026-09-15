@@ -130,6 +130,7 @@ global shortcut swallows that key in *every* application.
 | --- | --- |
 | `⌘⇧Space` | Open the palette over the current app (configurable) |
 | `⌘⇧V` | Open it on the [clipboard history](#clipboard-history) instead |
+| `tab` | Switch to the clipboard history — `tab` again comes back |
 | `↑` `↓` / `⌃N` `⌃P` | Move through results |
 | `↵` | Expand and paste — or open the fill-in step if the macro has variables |
 | `⌘↵` | Put the expansion on the clipboard instead of pasting |
@@ -341,7 +342,7 @@ newest first — **with the app you copied it from**.
 │   ▨ᶜ                          │                              │
 │     PNG image · Chrome · Cop… │                              │
 └───────────────────────────────┴──────────────────────────────┘
-  ↵ paste   ⌘↵ copy only   ⌘⌫ forget   esc close       Macros
+  ↵ paste   ⌘↵ copy only   ⌘⌫ forget   esc close   tab Macros
 ```
 
 | Key | Does |
@@ -350,6 +351,7 @@ newest first — **with the app you copied it from**.
 | `↵` | Paste it back into the app you were in |
 | `⌘↵` | Put it on the clipboard without pasting |
 | `⌘⌫` | Forget this one |
+| `tab` | Back to the macros |
 | `esc` | Close |
 
 Typing filters. Unlike the macro search this is a plain substring match, not a
