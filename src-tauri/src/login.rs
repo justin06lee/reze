@@ -21,9 +21,10 @@ pub enum LoginItem {
     Disabled,
     /// Registered, but switched off by the user in System Settings. Only they
     /// can undo that, so the UI has to say so rather than quietly re-register.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     RequiresApproval,
-    /// Nothing here can do it: not macOS, older than macOS 13, or a dev build
-    /// rather than an installed app bundle.
+    /// Nothing here can do it: an unsupported OS, older than macOS 13, or a dev
+    /// build rather than an installed app.
     Unsupported,
 }
 
@@ -112,19 +113,117 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// An XDG autostart entry: a desktop file in `~/.config/autostart`, which
+/// GNOME, KDE and every other freedesktop session launches at login. The file
+/// is the whole of the state — it exists or it does not — so, as on macOS,
+/// the answer is read back from where the session reads it, and a user who
+/// deletes it or switches it off in GNOME Tweaks is believed.
+#[cfg(target_os = "linux")]
+mod imp {
+    use super::LoginItem;
+    use std::path::PathBuf;
+
+    fn entry_path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".config"))
+            .join("autostart")
+            .join("reze.desktop")
+    }
+
+    /// The binary to start. A debug build is refused for the same reason macOS
+    /// refuses one without a bundle: it lives in `target/`, and the next
+    /// `cargo clean` would leave a login entry pointing at nothing.
+    fn installed_exe() -> Option<PathBuf> {
+        if cfg!(debug_assertions) {
+            return None;
+        }
+        std::env::current_exe().ok()
+    }
+
+    /// Switched off without being removed: `Hidden=true` is the spec's way,
+    /// and GNOME writes its own key instead.
+    fn switched_off(body: &str) -> bool {
+        body.lines().map(str::trim).any(|l| {
+            l.eq_ignore_ascii_case("Hidden=true")
+                || l.eq_ignore_ascii_case("X-GNOME-Autostart-enabled=false")
+        })
+    }
+
+    pub fn status() -> LoginItem {
+        if installed_exe().is_none() {
+            return LoginItem::Unsupported;
+        }
+        match std::fs::read_to_string(entry_path()) {
+            Ok(body) if !switched_off(&body) => LoginItem::Enabled,
+            _ => LoginItem::Disabled,
+        }
+    }
+
+    pub fn set(enabled: bool) -> Result<(), String> {
+        let path = entry_path();
+        if !enabled {
+            return match std::fs::remove_file(&path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    Err(format!("Could not remove {}: {e}", path.display()))
+                }
+                _ => Ok(()),
+            };
+        }
+        let exe = installed_exe().ok_or(
+            "Only an installed Reze can start itself at login — a dev build lives in \
+             target/ and would be gone after the next clean. Run `make` first.",
+        )?;
+        // Quoted per the desktop entry spec, which reserves these four inside quotes.
+        let mut quoted = String::new();
+        for c in exe.to_string_lossy().chars() {
+            if matches!(c, '"' | '`' | '$' | '\\') {
+                quoted.push('\\');
+            }
+            quoted.push(c);
+        }
+        let body = format!(
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name=Reze\n\
+             Comment=Turn short triggers into full prompts\n\
+             Exec=\"{quoted}\"\n\
+             Icon=reze\n\
+             Terminal=false\n\
+             X-GNOME-Autostart-enabled=true\n"
+        );
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+        }
+        std::fs::write(&path, body).map_err(|e| format!("Could not write {}: {e}", path.display()))
+    }
+
+    /// No settings pane to open: GNOME keeps login apps in Tweaks, which may
+    /// not be installed, and the switch in Reze is the same file anyway.
+    pub fn open_settings() {}
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn a_switched_off_entry_reads_as_off() {
+            assert!(super::switched_off("[Desktop Entry]\nHidden=true\n"));
+            assert!(super::switched_off("X-GNOME-Autostart-enabled=false"));
+            assert!(!super::switched_off("[Desktop Entry]\nX-GNOME-Autostart-enabled=true\n"));
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod imp {
     use super::LoginItem;
 
-    /// Nothing implemented off macOS yet. Linux would want an XDG autostart
-    /// entry in `~/.config/autostart`; reporting `Unsupported` keeps the UI
-    /// honest until that exists, rather than showing a switch that does nothing.
+    /// Nothing implemented here. Reporting `Unsupported` keeps the UI honest,
+    /// rather than showing a switch that does nothing.
     pub fn status() -> LoginItem {
         LoginItem::Unsupported
     }
 
     pub fn set(_enabled: bool) -> Result<(), String> {
-        Err("Launching at login is only implemented on macOS.".into())
+        Err("Launching at login is only implemented on macOS and Linux.".into())
     }
 
     pub fn open_settings() {}

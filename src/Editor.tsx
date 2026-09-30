@@ -7,6 +7,7 @@ import { AttachmentMedia, AttachmentTile, ClipIcon } from "./Attachments";
 import { accelerator, isModifierOnly, prettyHotkey } from "./lib/hotkey";
 import { BUILTINS, collectVariables, expandIncludes } from "./lib/template";
 import { useLibrary } from "./lib/useLibrary";
+import { INSTALL, isMac, MOD, REVEAL } from "./lib/platform";
 import {
   emptyMacro,
   formatBytes,
@@ -268,6 +269,46 @@ export default function Editor() {
     return () => window.removeEventListener("paste", onPaste);
   }, [pasteFiles]);
 
+  /**
+   * Ctrl+V on Linux, where the paste event above never sees a file: WebKitGTK
+   * hands the page a copied file as nothing at all — no "Files", not even its
+   * URI list. So the keystroke asks the real clipboard itself. Files or a
+   * picture there are attached; anything else is typed in exactly where the
+   * paste would have put it.
+   */
+  useEffect(() => {
+    if (isMac) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || e.shiftKey || e.altKey || e.metaKey || e.key.toLowerCase() !== "v") return;
+      const field = document.activeElement as HTMLElement | null;
+      // Only where a paste could go — not, say, the hotkey recorder's button.
+      const editable =
+        !field ||
+        field === document.body ||
+        field.isContentEditable ||
+        field instanceof HTMLTextAreaElement ||
+        field instanceof HTMLInputElement;
+      if (!editable) return;
+      e.preventDefault();
+      api
+        .importClipboard()
+        .then(async (imported) => {
+          if (imported.attachments.length > 0 || imported.errors.length > 0) {
+            attachRef.current(imported);
+            return;
+          }
+          const text = await api.readClipboard();
+          if (text && field && field !== document.body) {
+            field.focus();
+            document.execCommand("insertText", false, text);
+          }
+        })
+        .catch((err) => setNotice(String(err)));
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey)) return;
@@ -372,7 +413,7 @@ export default function Editor() {
                 placeholder="Filter"
                 spellCheck={false}
               />
-              <button className="e-new" onClick={addMacro} title="New macro (⌘N)">
+              <button className="e-new" onClick={addMacro} title={`New macro (${MOD}N)`}>
                 +
               </button>
             </div>
@@ -471,7 +512,7 @@ export default function Editor() {
                   </div>
                 ) : (
                   <p className="e-attachments-empty">
-                    Drop an image or video anywhere in this window, or press ⌘V with one
+                    Drop an image or video anywhere in this window, or press {MOD}V with one
                     copied. They are pasted after the text when the macro runs.
                   </p>
                 )}
@@ -518,7 +559,7 @@ export default function Editor() {
             </section>
           ) : (
             <section className="e-detail e-detail--empty">
-              <p>Select a macro, or create one with ⌘N.</p>
+              <p>Select a macro, or create one with {MOD}N.</p>
             </section>
           )}
         </div>
@@ -607,7 +648,7 @@ function FolderDetail({ macro, onAdopt }: { macro: Macro; onAdopt: () => void })
       </div>
 
       <div className="e-actions">
-        {file?.path && <button onClick={() => api.revealPath(file.path!)}>Reveal in Finder</button>}
+        {file?.path && <button onClick={() => api.revealPath(file.path!)}>{REVEAL}</button>}
         <button onClick={onAdopt}>Make an editable copy</button>
       </div>
     </section>
@@ -636,7 +677,11 @@ function SettingsPane({
       if (isModifierOnly(e)) return;
       const accel = accelerator(e);
       if (!accel) {
-        setHotkeyError("Include at least one modifier (⌘, ⌥, ⌃ or ⇧).");
+        setHotkeyError(
+          isMac
+            ? "Include at least one modifier (⌘, ⌥, ⌃ or ⇧)."
+            : "Include at least one modifier (Ctrl, Alt, Super or Shift).",
+        );
         return;
       }
       const next = { ...library.settings, [recording]: accel };
@@ -708,9 +753,12 @@ function SettingsPane({
               the only way to know what you typed is to have watched you type it. Reze keeps the
               last 160 characters in memory — never written to disk, never sent anywhere — and
               discards them on Enter, Tab, Escape, any arrow key, any click, any shortcut, and
-              whenever you switch apps. macOS blocks this outright while a password field is
-              focused. Turn it off and expansion falls back to selecting the words at your
-              caret, which works in normal text fields but not in a terminal.
+              whenever you switch apps.{" "}
+              {isMac
+                ? "macOS blocks this outright while a password field is focused."
+                : "X11 has no equivalent of macOS's secure input, so a password typed into a field passes through it too — in memory only, and gone at the Enter that submits it."}{" "}
+              Turn it off and expansion falls back to selecting the words at your caret, which
+              works in normal text fields but not in a terminal.
             </em>
           </span>
         </label>
@@ -784,7 +832,7 @@ function SettingsPane({
         </p>
         <div className="e-row">
           <code className="e-path">{path}</code>
-          <button onClick={() => api.revealLibrary()}>Reveal in Finder</button>
+          <button onClick={() => api.revealLibrary()}>{REVEAL}</button>
         </div>
       </section>
     </div>
@@ -989,7 +1037,7 @@ function GrabSection() {
       {missing.length > 0 && (
         <p className="e-warn">
           Missing {missing.join(", ")} — install with{" "}
-          <code>brew install {missing.join(" ")}</code>
+          <code>{installHint(missing as string[])}</code>
         </p>
       )}
       <p className="e-note">
@@ -998,6 +1046,22 @@ function GrabSection() {
       </p>
     </section>
   );
+}
+
+/**
+ * The command that installs what is missing. One package manager on macOS; on
+ * Linux ffmpeg is a system package, while the downloaders come from pipx —
+ * a distribution's yt-dlp is months behind the sites it has to keep up with.
+ */
+function installHint(missing: string[]): string {
+  if (isMac) return `${INSTALL} ${missing.join(" ")}`;
+  const tools = missing.filter((m) => m !== "ffmpeg");
+  return [
+    missing.includes("ffmpeg") && "sudo apt install ffmpeg",
+    tools.length > 0 && `${INSTALL} ${tools.join(" ")}`,
+  ]
+    .filter(Boolean)
+    .join(" && ");
 }
 
 function ToolRow({ name, at, does }: { name: string; at: string | null; does: string }) {
@@ -1050,11 +1114,17 @@ function StartupSection() {
     <section>
       <h2>Startup</h2>
       {state === null ? null : state === "unsupported" ? (
-        <p className="e-note">
-          Not available from here — this needs macOS 13 or later, and the installed{" "}
-          <code>Reze.app</code> rather than a dev build. Add Reze under System Settings →
-          General → Login Items by hand instead.
-        </p>
+        isMac ? (
+          <p className="e-note">
+            Not available from here — this needs macOS 13 or later, and the installed{" "}
+            <code>Reze.app</code> rather than a dev build. Add Reze under System Settings →
+            General → Login Items by hand instead.
+          </p>
+        ) : (
+          <p className="e-note">
+            Not available from a dev build — run <code>make</code> to install Reze first.
+          </p>
+        )
       ) : (
         <>
           <label className="e-check">
@@ -1066,8 +1136,9 @@ function StartupSection() {
             <span>
               Start Reze when I log in
               <em>
-                Comes back in the menu bar on every login, so the hotkeys are live without
-                opening anything. macOS lists it under System Settings → General → Login Items.
+                {isMac
+                  ? "Comes back in the menu bar on every login, so the hotkeys are live without opening anything. macOS lists it under System Settings → General → Login Items."
+                  : "Comes back in the panel on every login, so the hotkeys are live without opening anything. Written as ~/.config/autostart/reze.desktop, which GNOME Tweaks lists under Startup Applications."}
               </em>
             </span>
           </label>
@@ -1085,10 +1156,12 @@ function StartupSection() {
             </div>
           )}
 
-          <p className="e-note">
-            Reinstalling Reze replaces the app bundle and clears this, the same way it clears
-            the Accessibility grant — tick it again after <code>make update</code>.
-          </p>
+          {isMac && (
+            <p className="e-note">
+              Reinstalling Reze replaces the app bundle and clears this, the same way it clears
+              the Accessibility grant — tick it again after <code>make update</code>.
+            </p>
+          )}
         </>
       )}
     </section>

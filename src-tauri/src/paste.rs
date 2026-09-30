@@ -33,14 +33,27 @@ pub fn request_accessibility() -> bool {
     }
 }
 
+/// On Linux this goes through GTK rather than `arboard`, which drops the X11
+/// selection along with its last handle: text written and forgotten there is
+/// gone before the synthesized paste can ask for it. See [`crate::clip`].
 pub fn read_clipboard() -> Result<String, String> {
-    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    cb.get_text().or_else(|_| Ok(String::new()))
+    #[cfg(target_os = "linux")]
+    return crate::clip::read_text();
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+        cb.get_text().or_else(|_| Ok(String::new()))
+    }
 }
 
 pub fn write_clipboard(text: &str) -> Result<(), String> {
-    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    cb.set_text(text.to_string()).map_err(|e| e.to_string())
+    #[cfg(target_os = "linux")]
+    return crate::clip::write_text(text);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+        cb.set_text(text.to_string()).map_err(|e| e.to_string())
+    }
 }
 
 /// A value nothing else would ever put on the clipboard.
@@ -190,6 +203,10 @@ pub fn send(chord: Chord, times: usize) -> Result<(), String> {
         Chord::CollapseRight => (&[], Key::RightArrow),
         Chord::Backspace => (&[], Key::Backspace),
         Chord::Copy => (&[command], Key::Unicode('c')),
+        // A terminal on Linux takes Ctrl+V as a literal ^V for the shell.
+        Chord::Paste if crate::focus::frontmost_is_terminal() => {
+            (&[Key::Control, Key::Shift], Key::Unicode('v'))
+        }
         Chord::Paste => (&[command], Key::Unicode('v')),
     };
     tap(modifiers, key, times)

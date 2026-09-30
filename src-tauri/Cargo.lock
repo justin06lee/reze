@@ -3018,6 +3018,8 @@ dependencies = [
  "dirs",
  "enigo",
  "foreign-types",
+ "gdkx11",
+ "gtk",
  "libc",
  "macos-accessibility-client",
  "notify",
@@ -3025,6 +3027,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "objc2-service-management",
+ "png 0.17.16",
  "serde",
  "serde_json",
  "tauri",
@@ -3034,6 +3037,8 @@ dependencies = [
  "tauri-plugin-opener",
  "uuid",
  "window-vibrancy 0.8.0",
+ "x11rb",
+ "xkeysym",
 ]
 
 [[package]]

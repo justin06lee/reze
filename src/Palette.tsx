@@ -11,6 +11,7 @@ import {
   type Variable,
 } from "./lib/template";
 import { useLibrary } from "./lib/useLibrary";
+import { INSTALL, MOD } from "./lib/platform";
 import { AttachmentMedia, AttachmentTile, ClipIcon } from "./Attachments";
 import { ClipboardIcon, ClipPreview, ClipRow, useClips } from "./Clips";
 import type { Attachment, ClipEntry, Grabbed, GrabTools, Macro } from "./lib/types";
@@ -212,7 +213,7 @@ export default function Palette() {
       } catch (e) {
         setError(
           String(e) === "accessibility-denied"
-            ? `${ACCESSIBILITY_NOTE} ⌘↵ still copies.`
+            ? `${ACCESSIBILITY_NOTE} ${MOD}↵ still copies.`
             : String(e),
         );
       }
@@ -266,7 +267,7 @@ export default function Palette() {
       } catch (e) {
         setError(
           String(e) === "accessibility-denied"
-            ? `${ACCESSIBILITY_NOTE} ⌘↵ still copies.`
+            ? `${ACCESSIBILITY_NOTE} ${MOD}↵ still copies.`
             : String(e),
         );
       }
@@ -631,10 +632,10 @@ export default function Palette() {
               <kbd>↵</kbd> paste
             </span>
             <span>
-              <kbd>⌘↵</kbd> copy only
+              <kbd>{MOD}↵</kbd> copy only
             </span>
             <span>
-              <kbd>⌘⌫</kbd> forget
+              <kbd>{MOD}⌫</kbd> forget
             </span>
             <span>
               <kbd>esc</kbd> close
@@ -646,7 +647,7 @@ export default function Palette() {
               <kbd>↵</kbd> {stage === "fill" ? "paste" : "select"}
             </span>
             <span>
-              <kbd>⌘↵</kbd> {shown?.attachments.length && !preview ? "copy file" : "copy only"}
+              <kbd>{MOD}↵</kbd> {shown?.attachments.length && !preview ? "copy file" : "copy only"}
             </span>
             <span>
               <kbd>esc</kbd> {stage === "fill" ? "back" : "close"}
@@ -718,7 +719,7 @@ function GrabPanel({
       {!grabbing && tools && !tools.ytDlp && !tools.galleryDl && (
         <p className="p-grab-warn">
           Needs <code>yt-dlp</code> for video and <code>gallery-dl</code> for images —
-          <code>brew install yt-dlp gallery-dl</code>
+          <code>{INSTALL} yt-dlp gallery-dl</code>
         </p>
       )}
     </div>

@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import Palette from "./Palette";
 import Editor from "./Editor";
+import { isMac } from "./lib/platform";
 import "./global.css";
 
 // Both windows load the same bundle; the window label decides which one this is.
@@ -11,9 +12,7 @@ document.documentElement.dataset.window = label;
 
 // Several visual decisions are macOS-only — the blurred palette backdrop and
 // the gap for the traffic lights — so the stylesheet needs to know where it is.
-document.documentElement.dataset.platform = navigator.userAgent.includes("Mac")
-  ? "macos"
-  : "other";
+document.documentElement.dataset.platform = isMac ? "macos" : "other";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>{label === "editor" ? <Editor /> : <Palette />}</React.StrictMode>,

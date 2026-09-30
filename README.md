@@ -10,13 +10,13 @@
 
 ---
 
-Built for macOS. It also builds and runs on Linux under X11, with the
-macOS-specific pieces degrading rather than breaking: the palette paints its own
-surface instead of using the native blur, the tray gets the colour icon instead
-of a template glyph, and expansion uses the selection fallback because the
-keystroke tap is macOS-only. **Wayland is not supported** — it blocks synthetic
-input into other applications by design, which is the mechanism this whole app
-rests on.
+Built for macOS, and for Linux under X11 — GNOME, KDE or any window manager on
+Xorg. Every feature works on both: the palette, expanding in place (terminals
+included), attachments, the clipboard history with its app badges, and starting
+at login. Where Linux differs — mostly the hotkeys — it says so, and
+[On Linux](#on-linux) collects it. **Wayland is not supported** — it blocks
+synthetic input into other applications by design, which is the mechanism this
+whole app rests on.
 
 Hit a global hotkey anywhere, type `full analysis`, press Enter — the paragraph
 you actually meant gets pasted into whatever app you were already in.
@@ -84,6 +84,53 @@ installed `Reze.app` rather than a dev build.
 
 Reinstalling replaces the app bundle and clears the registration along with the
 Accessibility grant, so tick it again after `make update`.
+
+On Linux the same switch writes `~/.config/autostart/reze.desktop`, which every
+freedesktop session starts at login and GNOME Tweaks lists under Startup
+Applications. Reinstalling leaves it in place.
+
+### On Linux
+
+```bash
+make
+```
+
+The same one command. It builds the binary, installs it as `~/.local/bin/reze`
+with a desktop entry and icons under `~/.local/share` — so Reze is in the app
+grid like anything else — and starts it. Nothing needs root, and after pulling
+changes `make` (or `make update`) replaces the running copy.
+
+What it needs:
+
+- **An Xorg session.** On Ubuntu, pick *Ubuntu on Xorg* from the gear on the
+  login screen.
+- **bun, Rust, and Tauri's system libraries:**
+  ```bash
+  sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev \
+    libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+  ```
+- **A tray host** for the icon. Ubuntu's session has one built in; stock GNOME
+  needs the *AppIndicator and KStatusNotifierItem Support* extension. Without
+  one the hotkeys still work, but there is no icon to open the editor from —
+  the palette's **Edit macros** link does the same.
+- **`gstreamer1.0-libav`**, to preview video. WebKitGTK plays video through
+  GStreamer, and this is the H.264 decoder it can use. (On an NVIDIA Jetson the
+  hardware decoder outranks it but hands frames back in GPU memory the web view
+  cannot draw, so Reze ranks that one out for itself.)
+
+There is no Accessibility permission to grant: X11 lets any app synthesize
+input — and the reason Wayland is out is that it does not.
+
+The hotkeys are different, because the macOS ones are taken on Linux:
+
+| | macOS | Linux | Why not the same |
+| --- | --- | --- | --- |
+| Palette | `⌘⇧Space` | `Ctrl+Shift+Space` | — |
+| Expand in place | `⌥Space` | `Ctrl+Alt+Space` | `Alt+Space` is the window menu in GNOME, KDE and most window managers, and a key another app has grabbed cannot be grabbed again |
+| Clipboard history | `⌘⇧V` | `Super+Shift+V` | `Ctrl+Shift+V` is paste in every terminal, and a global hotkey would take it away from all of them |
+
+Inside the palette and the editor, `⌘` is `Ctrl`. All three hotkeys can be
+changed in Settings.
 
 ## Using it
 
@@ -181,9 +228,12 @@ Images go on the clipboard as the file *and* as the picture, so an app that
 inlines images gets one without reading the file, and an app that wants a file
 gets a real one. Everything else goes as a file.
 
-This part is macOS-only — there is no portable notion of "the clipboard holds
-these three files", and the X11 answer is a different protocol again. Elsewhere
-the text is still delivered and the attachments are reported as skipped.
+On Linux they go on the clipboard as a URI list — what browsers, Electron apps
+and file managers read a pasted file from — and in Nautilus's own format, so
+pasting into a folder copies them. An X11 clipboard holds one of each type
+rather than one item per file, so only a macro with a single image also puts
+the picture itself there — which a file manager given the choice takes, saving
+it as "Pasted image" rather than under the file's own name.
 
 ### Where they live
 
@@ -312,6 +362,19 @@ They are searched for on `PATH` and in the usual Homebrew and MacPorts
 locations, because an app launched from Finder inherits a `PATH` from `launchd`
 that has none of them in it.
 
+On Linux, take `ffmpeg` from the distribution and the other two from pipx, which
+puts them in `~/.local/bin` where Reze looks:
+
+```bash
+sudo apt install ffmpeg pipx gstreamer1.0-libav
+pipx install yt-dlp && pipx install gallery-dl
+```
+
+Not the distribution's `yt-dlp`: it is released months behind the sites it has
+to keep up with, and a yt-dlp that old no longer downloads from YouTube at all.
+`gstreamer1.0-libav` is not for downloading — it is the H.264 decoder the
+palette's video preview plays through.
+
 A link straight to a file — `…/photo.png` — skips all three and is fetched with
 `curl`, so that much works with nothing installed.
 
@@ -373,12 +436,18 @@ you copy and switch apps inside the same half second. The icon is asked of the
 running app once and cached in `~/.reze/clipboard/icons/`, so a hundred entries
 from Safari cost one icon.
 
+X11 is no different in what it records — the clipboard has an owner, but that
+is whichever window last claimed it, not an app — so on Linux it is the focused
+window when the clipboard changed. Its name comes from the app's desktop entry
+("Google Chrome", not `google-chrome`) and its icon from the window itself.
+
 ### What it does not record
 
 - **Anything an app marks private.** Password managers and their kind put
   `org.nspasteboard.ConcealedType` (or `TransientType`, or `AutoGeneratedType`)
   on the pasteboard alongside the value. Reze honours all of them and skips the
-  copy entirely.
+  copy entirely. On Linux the equivalent is `x-kde-passwordManagerHint`, which
+  KeePassXC and its kind set.
 - **Its own traffic.** Reze writes to the pasteboard constantly — every paste,
   every clipboard restore, and the synthesized `⌘C` that
   [expand in place](#expand-in-place) uses to read the words at your caret.
@@ -472,7 +541,24 @@ read back out of a terminal's line editor. So Reze watches typing instead:
   selecting the words at your caret, which works in normal text fields but not
   in a terminal.
 
-Only implemented on macOS. Elsewhere the selection fallback is always used.
+On Linux the same buffer is fed from XInput2's raw key events, with the same
+limits and the same resets. Two things differ, and both are X11's doing:
+
+- **Password fields are not exempt.** X11 has no secure input; any app may
+  watch the keyboard. A password typed into a field passes through the buffer
+  like anything else — held in memory only, never written anywhere, and gone at
+  the Enter that submits it. If that is not acceptable, turn `trackTyping` off.
+- **Only the first keyboard layout is read.** Someone switching layouts gets the
+  selection fallback instead.
+
+And in a Linux terminal the selection fallback is never tried: it copies with
+`Ctrl+C`, which a terminal takes as SIGINT to whatever is running. There, only
+what Reze saw typed can be expanded — and the expansion is pasted with
+`Ctrl+Shift+V`, since a terminal takes plain `Ctrl+V` as a literal ^V. Terminals
+are recognised by their window class (GNOME Terminal, Console, Ptyxis, Konsole,
+kitty, Alacritty, WezTerm, Ghostty, foot, Tilix, xterm and the like). xterm
+itself has no keyboard paste from the clipboard unless you give it one, so
+expansions cannot land there.
 
 The tap needs Accessibility permission to exist at all, so granting it *after*
 launch leaves it uninstalled. Reze retries on the next expansion rather than
@@ -494,6 +580,9 @@ lands (turn that off in Settings if you'd rather they weren't).
 Note that the permission is granted per-binary: the dev build and a bundled
 `Reze.app` are separate entries, and each needs granting once.
 
+Linux has no such permission — X11 lets any app synthesize input — so there is
+nothing to grant and no banner.
+
 ## Development
 
 ```bash
@@ -506,13 +595,14 @@ bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/b
 - `src-tauri/src/store.rs` — the JSON library, its schema, and the seed macros
 - `src-tauri/src/paste.rs` — clipboard + synthesized keystrokes, and the permission check
 - `src-tauri/src/assets.rs` — the attachment library on disk (`cargo test`)
-- `src-tauri/src/clip.rs` — the pasteboard, for everything that is not text
+- `src-tauri/src/clip.rs` — the pasteboard, for everything that is not text (and, on Linux, for text too)
 - `src-tauri/src/folders.rs` — watched folders becoming macros (`cargo test`)
 - `src-tauri/src/grab.rs` — a URL becoming a file (`cargo test`)
 - `src-tauri/src/expand.rs` — which trigger the typed words name (`cargo test`)
-- `src-tauri/src/typed.rs` — the keystroke tap behind terminal support
+- `src-tauri/src/typed.rs` — the keystroke tap behind terminal support (XInput2 on Linux)
 - `src-tauri/src/focus.rs` — remembering who had focus, and pasteboard change detection
-- `src-tauri/src/login.rs` — the launch-at-login switch, via `SMAppService`
+- `src-tauri/src/login.rs` — the launch-at-login switch, via `SMAppService` (an XDG autostart entry on Linux)
+- `src-tauri/src/x11.rs` — Linux: focus, app names and icons, terminals (`cargo test`)
 - `src-tauri/src/lib.rs` — windows, tray, global hotkeys, file watcher, IPC commands
 - `src/lib/template.ts` — the template language (variables, includes, built-ins)
 - `src/lib/fuzzy.ts` — the palette's ranking

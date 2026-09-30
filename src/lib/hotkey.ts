@@ -29,6 +29,8 @@ export function accelerator(e: KeyboardEvent): string | null {
   return parts.join("+");
 }
 
+import { isMac } from "./platform";
+
 const GLYPHS: Record<string, string> = {
   Control: "⌃",
   Ctrl: "⌃",
@@ -43,7 +45,31 @@ const GLYPHS: Record<string, string> = {
   CommandOrControl: "⌘",
 };
 
+/**
+ * The same keys by name, as Linux and Windows write them. The glyphs are a
+ * Mac convention, and ⌘ in particular means nothing on a keyboard without it.
+ */
+const NAMES: Record<string, string> = {
+  Control: "Ctrl",
+  Ctrl: "Ctrl",
+  Alt: "Alt",
+  Option: "Alt",
+  Shift: "Shift",
+  Super: "Super",
+  Meta: "Super",
+  Command: "Super",
+  Cmd: "Super",
+  CmdOrCtrl: "Ctrl",
+  CommandOrControl: "Ctrl",
+};
+
 export function prettyHotkey(accel: string): string {
+  if (!isMac) {
+    return accel
+      .split("+")
+      .map((part) => NAMES[part] ?? keyName(part))
+      .join("+");
+  }
   return accel
     .split("+")
     .map((part) => {
@@ -54,4 +80,10 @@ export function prettyHotkey(accel: string): string {
       return part;
     })
     .join("");
+}
+
+function keyName(part: string): string {
+  if (part.startsWith("Key")) return part.slice(3);
+  if (part.startsWith("Digit")) return part.slice(5);
+  return part;
 }

@@ -37,6 +37,14 @@ const EXTRA_BIN_DIRS: [&str; 5] = [
     "~/bin",
 ];
 
+/// How the tools are installed here, for the messages that name them. On
+/// Linux not the distribution's packages: those lag months behind the sites,
+/// and a yt-dlp a few months old no longer downloads from YouTube at all.
+#[cfg(target_os = "macos")]
+const INSTALL: &str = "brew install";
+#[cfg(not(target_os = "macos"))]
+const INSTALL: &str = "pipx install";
+
 /// Which download tools are actually present.
 #[derive(Default, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -142,16 +150,18 @@ pub fn grab(url: &str, dir: &Path) -> Result<Grabbed, String> {
 
     if tools.yt_dlp.is_none() && tools.gallery_dl.is_none() {
         return Err(
-            "Grabbing needs yt-dlp for video and gallery-dl for images. \
-             Install them with `brew install yt-dlp gallery-dl`."
-                .into(),
+            format!(
+                "Grabbing needs yt-dlp for video and gallery-dl for images. \
+                 Install them with `{INSTALL} yt-dlp gallery-dl`."
+            ),
         );
     }
     if tools.gallery_dl.is_none() {
         problems.push(
-            "No image extractor — install one with `brew install gallery-dl` if that post \
-             is images rather than video."
-                .into(),
+            format!(
+                "No image extractor — install one with `{INSTALL} gallery-dl` if that post \
+                 is images rather than video."
+            ),
         );
     }
     Err(problems.join("\n\n"))

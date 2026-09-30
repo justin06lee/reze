@@ -5,7 +5,8 @@
 //! notion of "the clipboard holds these three files", and on macOS it is an
 //! `NSPasteboard` holding one item per file carrying `public.file-url`. That is
 //! what Finder writes on ⌘C and what every app that accepts a pasted file reads,
-//! so it is what we write too.
+//! so it is what we write too. On Linux it is an X11 selection offering a URI
+//! list, and there text goes through here as well — see the Linux `imp`.
 
 use std::path::{Path, PathBuf};
 
@@ -49,6 +50,7 @@ pub enum Snapshot {
 /// every password manager and clipboard manager on macOS has agreed on, and
 /// honouring it is the difference between a history that is useful and one that
 /// quietly accumulates the user's passwords.
+#[cfg(target_os = "macos")]
 const PRIVATE_TYPES: [&str; 4] = [
     "org.nspasteboard.ConcealedType",
     "org.nspasteboard.TransientType",
@@ -239,6 +241,10 @@ mod imp {
         Some(item)
     }
 
+    /// Nothing to set up: [`crate::focus::pasteboard_change_count`] asks
+    /// `NSPasteboard` directly.
+    pub fn watch() {}
+
     fn inline_uti(path: &Path) -> Option<&'static str> {
         let ext = path.extension()?.to_str()?.to_lowercase();
         let mime = match ext.as_str() {
@@ -255,30 +261,320 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// The X11 clipboard, through GTK — which Tauri already runs on Linux, and
+/// which does the parts of the selection protocol that are easy to get wrong:
+/// large transfers in pieces (`INCR`), converting between text encodings, and
+/// answering other apps' requests for as long as we own the clipboard.
+///
+/// That last point is the X11 difference that matters. The clipboard holds no
+/// data, only a note of who owns it; pasting asks the owner. So whatever we put
+/// there has to be served by a process that stays alive — this one, from its
+/// GTK main loop — rather than written and forgotten.
+///
+/// GTK is single-threaded, so everything goes through [`with_clipboard`].
+#[cfg(target_os = "linux")]
+mod imp {
+    use super::*;
+    use gtk::gdk;
+    use gtk::glib;
+    use gtk::glib::prelude::ObjectExt;
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+    use std::time::Duration;
+
+    /// What KeePassXC and its kind put alongside a password — the X11 version
+    /// of `org.nspasteboard.ConcealedType`.
+    const PRIVATE_TARGETS: [&str; 1] = ["x-kde-passwordManagerHint"];
+
+    const TEXT_TARGETS: [&str; 6] = [
+        "UTF8_STRING",
+        "text/plain;charset=utf-8",
+        "text/plain",
+        "STRING",
+        "TEXT",
+        "COMPOUND_TEXT",
+    ];
+
+    /// Raw image types worth taking as they are, best first. Anything else an
+    /// app offers as an image is converted to PNG by GTK.
+    const IMAGE_TARGETS: [&str; 3] = ["image/png", "image/jpeg", "image/gif"];
+
+    /// Bumped on every change of clipboard owner, which is what copying *is*
+    /// on X11. Stands in for macOS's `changeCount`.
+    static CHANGES: AtomicIsize = AtomicIsize::new(0);
+    static WATCHING: AtomicBool = AtomicBool::new(false);
+
+    fn clipboard() -> gtk::Clipboard {
+        gtk::Clipboard::get(&gdk::Atom::intern("CLIPBOARD"))
+    }
+
+    /// Run `f` against the clipboard on GTK's thread and wait for the answer.
+    ///
+    /// Called from GTK's own thread it simply runs; the `wait_for_*` calls it
+    /// makes then spin a nested main loop, which is how GTK means them to be
+    /// used. From any other thread it is handed over, and given up on after a
+    /// few seconds — a clipboard owner that never answers must not wedge a
+    /// paste forever.
+    fn with_clipboard<T: Send + 'static>(
+        f: impl FnOnce(&gtk::Clipboard) -> T + Send + 'static,
+    ) -> Option<T> {
+        if gtk::is_initialized_main_thread() {
+            return Some(f(&clipboard()));
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        glib::MainContext::default().invoke(move || {
+            let _ = tx.send(f(&clipboard()));
+        });
+        rx.recv_timeout(Duration::from_secs(5)).ok()
+    }
+
+    /// Start counting changes. Must run on GTK's thread; Tauri's `setup` does.
+    pub fn watch() {
+        if !gtk::is_initialized_main_thread() || WATCHING.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        clipboard().connect_local("owner-change", false, |_| {
+            CHANGES.fetch_add(1, Ordering::SeqCst);
+            None
+        });
+    }
+
+    pub fn change_count() -> Option<isize> {
+        WATCHING
+            .load(Ordering::SeqCst)
+            .then(|| CHANGES.load(Ordering::SeqCst))
+    }
+
+    /// Take the clipboard with `claim`, and return once the change has been
+    /// counted.
+    ///
+    /// On macOS the counter moves the instant we write. Here it moves when the
+    /// X server's notice of our own claim comes back around — a few
+    /// milliseconds later — and a history suspended only until the write
+    /// returned would wake up just in time to record Reze's own paste. From
+    /// GTK's thread there is no waiting: the notice cannot arrive while that
+    /// thread is blocked, and nothing that writes from there holds a suspend.
+    fn claim<T: Send + 'static>(
+        take: impl FnOnce(&gtk::Clipboard) -> T + Send + 'static,
+    ) -> Option<T> {
+        let before = CHANGES.load(Ordering::SeqCst);
+        let out = with_clipboard(take)?;
+        if WATCHING.load(Ordering::SeqCst) && !gtk::is_initialized_main_thread() {
+            for _ in 0..25 {
+                if CHANGES.load(Ordering::SeqCst) != before {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        Some(out)
+    }
+
+    fn targets(cb: &gtk::Clipboard) -> Vec<String> {
+        cb.wait_for_targets()
+            .unwrap_or_default()
+            .iter()
+            .map(|a| a.name().to_string())
+            .collect()
+    }
+
+    fn offers(targets: &[String], any_of: &[&str]) -> bool {
+        targets.iter().any(|t| any_of.contains(&t.as_str()))
+    }
+
+    /// Local files on the clipboard, as a file manager puts them there.
+    /// `http://` links in a URI list are not files, and are left to be read as
+    /// the text they also come as.
+    fn files(cb: &gtk::Clipboard, targets: &[String]) -> Vec<PathBuf> {
+        if !offers(targets, &["text/uri-list", "x-special/gnome-copied-files"]) {
+            return Vec::new();
+        }
+        let mut uris: Vec<String> = cb.wait_for_uris().iter().map(|u| u.to_string()).collect();
+        if uris.is_empty() {
+            // Nautilus's own format: "copy" or "cut", then one URI a line.
+            if let Some(data) = cb.wait_for_contents(&gdk::Atom::intern("x-special/gnome-copied-files")) {
+                let body = String::from_utf8_lossy(&data.data()).to_string();
+                uris = body.lines().skip(1).map(str::to_string).collect();
+            }
+        }
+        uris.iter()
+            .filter_map(|u| glib::filename_from_uri(u).ok().map(|(path, _)| path))
+            .take(MAX_INCOMING)
+            .collect()
+    }
+
+    fn image(cb: &gtk::Clipboard, targets: &[String]) -> Option<(String, Vec<u8>)> {
+        for mime in IMAGE_TARGETS {
+            if !offers(targets, &[mime]) {
+                continue;
+            }
+            if let Some(data) = cb.wait_for_contents(&gdk::Atom::intern(mime)) {
+                let bytes = data.data();
+                if !bytes.is_empty() {
+                    return Some((mime.to_string(), bytes));
+                }
+            }
+        }
+        if !targets.iter().any(|t| t.starts_with("image/")) {
+            return None;
+        }
+        let pixbuf = cb.wait_for_image()?;
+        let png = pixbuf.save_to_bufferv("png", &[]).ok()?;
+        Some(("image/png".to_string(), png))
+    }
+
+    /// Files and images on the clipboard right now.
+    pub fn read_media() -> Vec<Incoming> {
+        with_clipboard(|cb| {
+            let targets = targets(cb);
+            let files = files(cb, &targets);
+            if !files.is_empty() {
+                return files.into_iter().map(Incoming::File).collect();
+            }
+            image(cb, &targets)
+                .map(|(mime, bytes)| vec![Incoming::Data { mime, bytes }])
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
+    }
+
+    /// What is on the clipboard right now, or `None` if it is nothing we keep.
+    /// Files, then text, then images — the same order as on macOS, for the
+    /// same reason: a copied file comes with its name as text too.
+    pub fn read_snapshot() -> Option<Snapshot> {
+        with_clipboard(|cb| {
+            let targets = targets(cb);
+            if targets.is_empty() || offers(&targets, &PRIVATE_TARGETS) {
+                return None;
+            }
+            let files = files(cb, &targets);
+            if !files.is_empty() {
+                return Some(Snapshot::Files(files));
+            }
+            if offers(&targets, &TEXT_TARGETS) {
+                if let Some(text) = cb.wait_for_text().filter(|t| !t.is_empty()) {
+                    return Some(Snapshot::Text(text.to_string()));
+                }
+            }
+            image(cb, &targets).map(|(mime, bytes)| Snapshot::Image { mime, bytes })
+        })
+        .flatten()
+    }
+
+    pub fn read_text() -> Result<String, String> {
+        with_clipboard(|cb| cb.wait_for_text().map(|t| t.to_string()).unwrap_or_default())
+            .ok_or_else(|| "the clipboard did not answer".to_string())
+    }
+
+    pub fn write_text(text: &str) -> Result<(), String> {
+        let text = text.to_string();
+        claim(move |cb| cb.set_text(&text))
+            .ok_or_else(|| "the clipboard did not answer".to_string())
+    }
+
+    /// Take the clipboard and serve each `(target, bytes)` pair on request.
+    fn offer(items: Vec<(String, Vec<u8>)>) -> Result<(), String> {
+        let taken = claim(move |cb| {
+            let entries: Vec<gtk::TargetEntry> = items
+                .iter()
+                .enumerate()
+                .map(|(i, (target, _))| {
+                    gtk::TargetEntry::new(target, gtk::TargetFlags::empty(), i as u32)
+                })
+                .collect();
+            cb.set_with_data(&entries, move |_, selection, info| {
+                if let Some((target, bytes)) = items.get(info as usize) {
+                    selection.set(&gdk::Atom::intern(target), 8, bytes);
+                }
+            })
+        });
+        match taken {
+            Some(true) => Ok(()),
+            Some(false) => Err("the clipboard refused the data".into()),
+            None => Err("the clipboard did not answer".into()),
+        }
+    }
+
+    /// Put raw image bytes on the clipboard, as the image they are.
+    pub fn write_image(mime: &str, bytes: &[u8]) -> Result<(), String> {
+        if !mime.starts_with("image/") {
+            return Err(format!("{mime} cannot go on the clipboard as an image"));
+        }
+        offer(vec![(mime.to_string(), bytes.to_vec())])
+    }
+
+    /// Replace the clipboard contents with `files`.
+    ///
+    /// As a URI list, which is what browsers and Electron apps read a pasted
+    /// file from, and in Nautilus's own format so pasting into a folder copies
+    /// them. A single image also goes as the picture itself, for apps that
+    /// would rather inline it — the one-item version of what macOS does per
+    /// item, since an X11 clipboard carries one of each type.
+    pub fn write_files(files: &[PathBuf]) -> Result<(), String> {
+        let uris: Vec<String> = files
+            .iter()
+            .filter_map(|p| glib::filename_to_uri(p, None).ok().map(|u| u.to_string()))
+            .collect();
+        if uris.is_empty() {
+            return Err("none of those files could be put on the clipboard".into());
+        }
+        let mut items = vec![
+            ("text/uri-list".to_string(), format!("{}\r\n", uris.join("\r\n")).into_bytes()),
+            (
+                "x-special/gnome-copied-files".to_string(),
+                format!("copy\n{}", uris.join("\n")).into_bytes(),
+            ),
+        ];
+        if let [only] = files {
+            if let Some(mime) = inline_mime(only) {
+                if let Ok(bytes) = std::fs::read(only) {
+                    items.push((mime.to_string(), bytes));
+                }
+            }
+        }
+        offer(items)
+    }
+
+    fn inline_mime(path: &Path) -> Option<&'static str> {
+        let ext = path.extension()?.to_str()?.to_lowercase();
+        let mime = match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            _ => return None,
+        };
+        INLINE_IMAGE_UTIS.iter().any(|(m, _)| *m == mime).then_some(mime)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod imp {
     use super::*;
 
-    /// No portable way to ask "what files are on the clipboard", and the X11
-    /// answer is a different protocol again. The editor still takes drops and
-    /// the file picker, which is where attachments actually come from.
+    /// No portable way to ask "what files are on the clipboard". The editor
+    /// still takes drops and the file picker, which is where attachments
+    /// actually come from.
     pub fn read_media() -> Vec<Incoming> {
         Vec::new()
     }
 
     pub fn write_files(_files: &[PathBuf]) -> Result<(), String> {
-        Err("attachments can only be put on the clipboard on macOS".into())
+        Err("attachments can only be put on the clipboard on macOS and Linux".into())
     }
 
-    /// Clipboard history is macOS-only for the same reason: there is no
-    /// portable way to be told the pasteboard changed, let alone by whom.
+    /// No clipboard history here for the same reason: there is no portable
+    /// way to be told the clipboard changed, let alone by whom.
     pub fn read_snapshot() -> Option<Snapshot> {
         None
     }
 
     pub fn write_image(_mime: &str, _bytes: &[u8]) -> Result<(), String> {
-        Err("images can only be put on the clipboard on macOS".into())
+        Err("images can only be put on the clipboard on macOS and Linux".into())
     }
+
+    pub fn watch() {}
 }
 
-pub use imp::{read_media, read_snapshot, write_files, write_image};
+pub use imp::{read_media, read_snapshot, watch, write_files, write_image};
+
+#[cfg(target_os = "linux")]
+pub use imp::{change_count, read_text, write_text};
