@@ -63,6 +63,12 @@ export type Settings = {
   trackTyping: boolean;
   pasteMode: PasteMode;
   restoreClipboard: boolean;
+  /** Opens the clipboard history. */
+  clipboardHotkey: string;
+  /** Whether what you copy is remembered at all. */
+  clipboardHistory: boolean;
+  /** How many copies to keep. */
+  clipboardLimit: number;
 };
 
 export type Library = {
@@ -100,7 +106,81 @@ export const emptyMacro = (): Macro => ({
 });
 
 /** The hotkey slots Settings can rebind. */
-export type HotkeySlot = "hotkey" | "expandHotkey";
+export type HotkeySlot = "hotkey" | "expandHotkey" | "clipboardHotkey";
+
+/** Which preview a clipboard entry gets, and which of its fields carries it. */
+export type ClipKind = "text" | "image" | "file";
+
+/**
+ * The app something was copied from.
+ *
+ * An inference — the pasteboard records no owner, so this is whoever was
+ * frontmost when it changed — but it is the thing that makes a list of
+ * near-identical snippets readable at a glance.
+ */
+export type ClipSource = {
+  bundleId: string;
+  name: string;
+  /** Bare name inside `~/.reze/clipboard/icons`, written once per app. */
+  icon?: string;
+};
+
+/**
+ * One remembered copy.
+ *
+ * `preview` is the head of the text, not the text: the backend keeps the whole
+ * thing and only resolves it when something is actually pasted, so listing two
+ * hundred entries does not mean carrying two hundred documents into the window.
+ */
+export type ClipEntry = {
+  id: string;
+  kind: ClipKind;
+  preview: string;
+  /** Length of the whole text, so the preview can say what it left out. */
+  chars: number;
+  /** Bare name inside `~/.reze/clipboard`, for an image. */
+  file?: string;
+  /** Absolute paths, for files copied in Finder. */
+  paths?: string[];
+  mime: string;
+  bytes: number;
+  /** Unix milliseconds. */
+  copiedAt: number;
+  source?: ClipSource;
+};
+
+/** What kind of thing this was, for the line under its title. */
+export function clipKindLabel(entry: ClipEntry): string {
+  if (entry.kind === "image") return entry.mime === "image/tiff" ? "Image" : "PNG image";
+  if (entry.kind === "file") {
+    const n = entry.paths?.length ?? 0;
+    return n > 1 ? `${n} files` : "File";
+  }
+  return "Text";
+}
+
+/**
+ * When it was copied, the way a person would say it: the time if it was today,
+ * the date if it was not.
+ */
+export function clipWhen(at: number): string {
+  const then = new Date(at);
+  const time = then.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const now = new Date();
+  const sameDay =
+    then.getFullYear() === now.getFullYear() &&
+    then.getMonth() === now.getMonth() &&
+    then.getDate() === now.getDate();
+  if (sameDay) return time;
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  const wasYesterday =
+    then.getFullYear() === yesterday.getFullYear() &&
+    then.getMonth() === yesterday.getMonth() &&
+    then.getDate() === yesterday.getDate();
+  if (wasYesterday) return `Yesterday ${time}`;
+  return `${then.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
+}
 
 /** What an import produced, and why anything else was skipped. */
 export type Imported = {

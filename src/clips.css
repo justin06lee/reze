@@ -1,0 +1,198 @@
+/* The clipboard history. Lives inside `.palette`, so it inherits its colours
+   and its light-mode overrides rather than restating them. */
+
+/* Sized to what is in it rather than to a fixed 320px like the macro list.
+   That list is always full — the seeds alone overflow it — where a history two
+   days old holds four things, and a half-empty pane next to four rows looks
+   broken rather than roomy. */
+.p-body.p-body--clips {
+  height: auto;
+  min-height: 120px;
+  max-height: 360px;
+}
+
+/* --------------------------------------------------------------- the list */
+
+/* Rows here are two lines with a thumbnail, not one line of text, so the list
+   needs more of the width than the macro list does.
+
+   Doubled up on the class deliberately: this file is bundled *before*
+   palette.css, so a single `.p-list--clips` would lose to `.p-list` on source
+   order alone and the rows would come out stacked and narrow. */
+.p-list.p-list--clips {
+  width: 52%;
+}
+
+.p-list.p-list--clips li {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+}
+
+/* ------------------------------------------------------------ thumbnails */
+
+.c-thumb {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.c-shot {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--sel);
+}
+
+.c-page {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  color: var(--fg-faint);
+}
+
+.c-page svg {
+  width: 22px;
+  height: 27px;
+}
+
+/* Sits on the page rather than beside it — an extension is only ever a couple
+   of characters, and the glyph is otherwise blank space. Held clear of the
+   bottom-right corner, which belongs to the source-app badge. */
+.c-ext {
+  position: absolute;
+  bottom: 13px;
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+}
+
+/* The source app, badged on the corner. Bottom-right and overhanging, the way
+   macOS badges a document with the app that made it. */
+.c-badge {
+  position: absolute;
+  right: -3px;
+  bottom: -2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 3.5px;
+  /* Nothing else in the palette casts a shadow, but the badge sits on top of a
+     thumbnail whose colours it cannot know, and without one a dark app icon on
+     a dark screenshot is invisible. */
+  box-shadow: 0 0 0 1.5px rgba(0, 0, 0, 0.28);
+}
+
+@media (prefers-color-scheme: light) {
+  .c-badge {
+    box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.9);
+  }
+}
+
+/* ----------------------------------------------------------------- text */
+
+.c-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.c-title {
+  font-size: 13px;
+  /* Whatever was copied, shown as one line: newlines collapse to spaces here,
+     which is what makes a copied paragraph legible as a row. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.c-meta {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* -------------------------------------------------------------- preview */
+
+.c-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.c-from {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.c-when {
+  font-size: 11px;
+  color: var(--fg-faint);
+  margin-left: auto;
+}
+
+.c-full {
+  display: block;
+  max-width: 100%;
+  max-height: 220px;
+  border-radius: 6px;
+  object-fit: contain;
+}
+
+.c-paths {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.c-paths li {
+  font: 11px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--fg-dim);
+  word-break: break-all;
+}
+
+.c-more {
+  margin: 10px 0 0;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+/* ------------------------------------------------------------ empty state */
+
+.c-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 30px 22px;
+  color: var(--fg-dim);
+  text-align: center;
+}
+
+.c-empty em {
+  font-style: normal;
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  max-width: 42ch;
+  line-height: 1.5;
+}

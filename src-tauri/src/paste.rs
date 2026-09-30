@@ -50,15 +50,28 @@ pub fn write_clipboard(text: &str) -> Result<(), String> {
 /// caller restores the user's clipboard either way.
 pub const SENTINEL: &str = "\u{200b}reze-nothing-was-copied\u{200b}";
 
-/// Copy `text` and `files` to the clipboard and paste them into the frontmost app.
+/// What goes on the pasteboard.
 ///
-/// A pasteboard holds one payload, so a macro carrying both takes two passes:
-/// **text first, then the files**. That order leaves the text landing exactly
-/// where the caret already was — unchanged from a text-only macro, including
-/// the surrounding characters an in-place expansion puts back — and lets the
-/// attachments follow it. In a chat composer they drop into the attachment tray;
-/// in a document they land after the paragraph. Both are what you would have
-/// done by hand, in that order.
+/// Two shapes rather than one because they arrive differently. A macro is text
+/// and files together; a clipboard-history image is bytes that were never a
+/// file to the app that copied them, and putting it back as a file attachment
+/// named after a UUID would not be the thing that was copied.
+pub enum Payload {
+    /// Text, then the files — see [`paste_payload`] for why in that order.
+    Bundle { text: String, files: Vec<PathBuf> },
+    /// Raw image bytes, read from `path` at the moment of pasting.
+    Image { mime: String, path: PathBuf },
+}
+
+/// Put `payload` on the clipboard and paste it into the frontmost app.
+///
+/// A pasteboard holds one payload, so a macro carrying both text and files
+/// takes two passes: **text first, then the files**. That order leaves the text
+/// landing exactly where the caret already was — unchanged from a text-only
+/// macro, including the surrounding characters an in-place expansion puts back
+/// — and lets the attachments follow it. In a chat composer they drop into the
+/// attachment tray; in a document they land after the paragraph. Both are what
+/// you would have done by hand, in that order.
 ///
 /// The caller is responsible for having already hidden our window — macOS
 /// restores focus to the previous app on hide, and the paste lands wherever
@@ -71,9 +84,8 @@ pub const SENTINEL: &str = "\u{200b}reze-nothing-was-copied\u{200b}";
 /// SIGTRAP — an uncatchable hard crash, not an `Err` — anywhere else. The
 /// clipboard work and the sleeps deliberately stay off the main thread so the
 /// UI is never blocked for the half second this takes.
-pub fn paste(
-    text: &str,
-    files: &[PathBuf],
+pub fn paste_payload(
+    payload: &Payload,
     restore_clipboard: bool,
     run_on_main: impl Fn(fn() -> Result<(), String>) -> Result<(), String>,
 ) -> Result<(), String> {
@@ -89,22 +101,33 @@ pub fn paste(
         false => None,
     };
 
-    if !text.is_empty() {
-        write_clipboard(text)?;
-        // Let the clipboard server and the focus change settle before the keystroke.
-        std::thread::sleep(Duration::from_millis(120));
-        run_on_main(send_paste_keystroke)?;
-    }
+    match payload {
+        Payload::Bundle { text, files } => {
+            if !text.is_empty() {
+                write_clipboard(text)?;
+                // Let the clipboard server and the focus change settle first.
+                std::thread::sleep(Duration::from_millis(120));
+                run_on_main(send_paste_keystroke)?;
+            }
 
-    if !files.is_empty() {
-        // The first paste has to have been read by the target app before the
-        // pasteboard is overwritten, or the second one arrives instead of it.
-        if !text.is_empty() {
-            std::thread::sleep(Duration::from_millis(280));
+            if !files.is_empty() {
+                // The first paste has to have been read by the target app
+                // before the pasteboard is overwritten, or the second one
+                // arrives instead of it.
+                if !text.is_empty() {
+                    std::thread::sleep(Duration::from_millis(280));
+                }
+                crate::clip::write_files(files)?;
+                std::thread::sleep(Duration::from_millis(140));
+                run_on_main(send_paste_keystroke)?;
+            }
         }
-        crate::clip::write_files(files)?;
-        std::thread::sleep(Duration::from_millis(140));
-        run_on_main(send_paste_keystroke)?;
+        Payload::Image { mime, path } => {
+            let bytes = std::fs::read(path).map_err(|e| format!("reading {path:?}: {e}"))?;
+            crate::clip::write_image(mime, &bytes)?;
+            std::thread::sleep(Duration::from_millis(140));
+            run_on_main(send_paste_keystroke)?;
+        }
     }
 
     if let Some(prev) = previous {
@@ -120,11 +143,17 @@ pub fn paste(
 /// One pasteboard, one payload: the text if there is any, otherwise the files.
 /// A macro carrying both cannot be copied as both, and silently dropping the
 /// text a user could actually see in the preview would be the worse half to lose.
-pub fn copy_only(text: &str, files: &[PathBuf]) -> Result<(), String> {
-    if text.is_empty() && !files.is_empty() {
-        return crate::clip::write_files(files);
+pub fn copy_payload(payload: &Payload) -> Result<(), String> {
+    match payload {
+        Payload::Bundle { text, files } if text.is_empty() && !files.is_empty() => {
+            crate::clip::write_files(files)
+        }
+        Payload::Bundle { text, .. } => write_clipboard(text),
+        Payload::Image { mime, path } => {
+            let bytes = std::fs::read(path).map_err(|e| format!("reading {path:?}: {e}"))?;
+            crate::clip::write_image(mime, &bytes)
+        }
     }
-    write_clipboard(text)
 }
 
 /// The key combinations we synthesize. Named rather than exposing `enigo::Key`
@@ -141,7 +170,7 @@ pub enum Chord {
     Paste,
 }
 
-/// Send `chord` `times` times. **Main thread only** — see [`paste`].
+/// Send `chord` `times` times. **Main thread only** — see [`paste_payload`].
 pub fn send(chord: Chord, times: usize) -> Result<(), String> {
     use enigo::Key;
 
@@ -195,7 +224,7 @@ fn tap(modifiers: &[enigo::Key], key: enigo::Key, times: usize) -> Result<(), St
     result
 }
 
-/// Main thread only — see [`paste`].
+/// Main thread only — see [`paste_payload`].
 fn send_paste_keystroke() -> Result<(), String> {
     send(Chord::Paste, 1)
 }

@@ -57,6 +57,17 @@ pub struct Settings {
     /// "paste" simulates Cmd+V into the previous app; "copy" only fills the clipboard.
     pub paste_mode: String,
     pub restore_clipboard: bool,
+    /// Opens the clipboard history. See [`crate::history`].
+    #[serde(default = "default_clipboard_hotkey")]
+    pub clipboard_hotkey: String,
+    /// Whether to remember what you copy at all. On by default — a clipboard
+    /// history that has to be switched on before it can catch the thing you
+    /// already lost is not one.
+    #[serde(default = "default_true")]
+    pub clipboard_history: bool,
+    /// How many copies to keep.
+    #[serde(default = "crate::history::default_limit")]
+    pub clipboard_limit: u32,
 }
 
 /// Seeded rather than left empty so grabbing works the moment it is pressed,
@@ -68,6 +79,11 @@ fn default_folders() -> Vec<String> {
 
 fn default_expand_hotkey() -> String {
     "Alt+Space".into()
+}
+
+/// ⌘⇧V, which is what every clipboard manager on the platform uses.
+fn default_clipboard_hotkey() -> String {
+    "CmdOrCtrl+Shift+V".into()
 }
 
 fn default_true() -> bool {
@@ -83,6 +99,9 @@ impl Default for Settings {
             track_typing: true,
             paste_mode: "paste".into(),
             restore_clipboard: true,
+            clipboard_hotkey: default_clipboard_hotkey(),
+            clipboard_history: true,
+            clipboard_limit: crate::history::default_limit(),
         }
     }
 }

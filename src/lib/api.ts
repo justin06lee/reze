@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   Attachment,
+  ClipEntry,
   Grabbed,
   GrabTools,
   Imported,
@@ -37,10 +38,15 @@ export const hidePalette = () => invoke<void>("hide_palette");
 /** Show without resetting — used when an in-place expansion needs values. */
 export const showPalette = () => invoke<void>("show_palette");
 export const openEditor = () => invoke<void>("open_editor");
+/** Keep the hotkeys in step when the window changes mode by itself. */
+export const setPaletteMode = (clipboard: boolean) =>
+  invoke<void>("set_palette_mode", { clipboard });
+/** Which mode was last asked for — see the command for why this is needed. */
+export const paletteMode = () => invoke<boolean>("palette_mode");
 export const quit = () => invoke<void>("quit");
 export const resizePalette = (height: number) => invoke<void>("resize_palette", { height });
-export const setHotkeys = (palette: string, expand: string) =>
-  invoke<void>("set_hotkeys", { palette, expand });
+export const setHotkeys = (palette: string, expand: string, clipboard: string) =>
+  invoke<void>("set_hotkeys", { palette, expand, clipboard });
 export const libraryPath = () => invoke<string>("library_path");
 export const revealLibrary = () => invoke<void>("reveal_library");
 export const revealPath = (path: string) => invoke<void>("reveal_path", { path });
@@ -59,6 +65,43 @@ export const grabUrl = (url: string) => invoke<Grabbed>("grab_url", { url });
 /** Rename a just-grabbed file, which renames the macro made from it. */
 export const renameGrab = (path: string, name: string) =>
   invoke<string>("rename_grab", { path, name });
+
+// ------------------------------------------------------- clipboard history
+
+/** Everything remembered, newest first. Previews only — see `ClipEntry`. */
+export const clipboardHistory = () => invoke<ClipEntry[]>("clipboard_history");
+
+/** Put a remembered entry back where the cursor is, or only on the clipboard. */
+export const deliverClip = (id: string, copyOnly: boolean) =>
+  invoke<void>("deliver_clip", { id, copyOnly });
+
+export const forgetClip = (id: string) => invoke<void>("forget_clip", { id });
+export const clearClips = () => invoke<void>("clear_clips");
+
+/**
+ * Where remembered images and source-app icons live.
+ *
+ * Cached the same way, and for the same reason, as `assetsDir` — every row in
+ * the list wants it.
+ */
+let clipRoot: Promise<string> | null = null;
+export const clipboardDir = () => {
+  clipRoot ??= invoke<string>("clipboard_dir").catch((e) => {
+    clipRoot = null;
+    throw e;
+  });
+  return clipRoot;
+};
+
+/** A URL for a remembered image. */
+export async function clipUrl(file: string): Promise<string> {
+  return convertFileSrc(`${await clipboardDir()}/${file}`);
+}
+
+/** A URL for a source app's icon. */
+export async function clipIconUrl(icon: string): Promise<string> {
+  return convertFileSrc(`${await clipboardDir()}/icons/${icon}`);
+}
 
 /**
  * Where attachment files live on disk.

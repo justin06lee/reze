@@ -60,3 +60,101 @@ pub fn pasteboard_change_count() -> Option<isize> {
         None
     }
 }
+
+/// Who copied something: enough to name and picture them in the history.
+///
+/// The frontmost app at the moment the pasteboard changed. That is an
+/// inference, not a fact the pasteboard carries — macOS records no owner — but
+/// it is the same inference every clipboard manager makes, and it is right
+/// except when you copy and switch apps inside the same half second.
+pub struct FrontApp {
+    pub pid: i32,
+    /// Empty for the rare process without one, e.g. a bare executable.
+    pub bundle_id: String,
+    pub name: String,
+}
+
+pub fn frontmost_app() -> Option<FrontApp> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSWorkspace;
+        let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+        Some(FrontApp {
+            pid: app.processIdentifier(),
+            bundle_id: app.bundleIdentifier().map(|s| s.to_string()).unwrap_or_default(),
+            name: app.localizedName().map(|s| s.to_string()).unwrap_or_default(),
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// That app's icon as PNG bytes, at roughly badge size.
+///
+/// Separate from [`frontmost_app`] because it is the expensive half — a decode
+/// and a re-encode — and the caller only needs it the first time it sees a
+/// given app.
+pub fn app_icon_png(pid: i32) -> Option<Vec<u8>> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::rc::Retained;
+        use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSRunningApplication};
+        use objc2_foundation::NSDictionary;
+
+        /// Smallest icon worth caching. The badge is drawn at 16pt, so this
+        /// covers a 2× display with room to spare — and an app icon carries a
+        /// 1024px representation whose PNG runs to well over a megabyte, which
+        /// is an absurd thing to keep one of per app for a 16-pixel badge.
+        const BADGE_PIXELS: isize = 64;
+
+        let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
+        let icon = app.icon()?;
+        // NSImage holds representations, not bytes. TIFF is the one format it
+        // will always hand back, and it hands back *all* of them — which is
+        // what makes it possible to choose a small one.
+        let tiff = icon.TIFFRepresentation()?;
+
+        let mut chosen: Option<Retained<NSBitmapImageRep>> = None;
+        {
+            let reps = NSBitmapImageRep::imageRepsWithData(&tiff);
+            for rep in reps.iter() {
+                let Some(bitmap) = rep.downcast_ref::<NSBitmapImageRep>() else {
+                    continue;
+                };
+                let wide = bitmap.pixelsWide();
+                // The smallest that is still big enough; failing that, the
+                // biggest available, for an icon with nothing above 64px.
+                let better = match &chosen {
+                    None => true,
+                    Some(best) => match (wide >= BADGE_PIXELS, best.pixelsWide() >= BADGE_PIXELS) {
+                        (true, true) => wide < best.pixelsWide(),
+                        (true, false) => true,
+                        (false, true) => false,
+                        (false, false) => wide > best.pixelsWide(),
+                    },
+                };
+                if better {
+                    chosen = Some(Retained::from(bitmap));
+                }
+            }
+        }
+        // A TIFF that would not decompose into representations still encodes
+        // whole, so fall back to that rather than losing the icon.
+        let rep = match chosen {
+            Some(rep) => rep,
+            None => NSBitmapImageRep::imageRepWithData(&tiff)?,
+        };
+
+        let png = unsafe {
+            rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+        }?;
+        Some(png.to_vec())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        None
+    }
+}
