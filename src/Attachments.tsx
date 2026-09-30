@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import * as api from "./lib/api";
+import { isMac } from "./lib/platform";
 import { formatBytes, type Attachment } from "./lib/types";
 import "./attachments.css";
 
@@ -19,6 +20,7 @@ export function useAttachmentUrl(attachment: Attachment): string | null {
     let alive = true;
     api
       .attachmentUrl(attachment)
+      .then((u) => (playsFromAsset(attachment) ? u : viaBlob(u, attachment.bytes)))
       .then((u) => alive && setUrl(u))
       .catch(() => {});
     return () => {
@@ -26,6 +28,47 @@ export function useAttachmentUrl(attachment: Attachment): string | null {
     };
   }, [attachment.file, attachment.path]);
   return url;
+}
+
+/**
+ * Whether the web view can play this straight off `asset://`.
+ *
+ * Not video or audio on Linux. WebKitGTK plays media through GStreamer, whose
+ * WebKit source element loads http, https and blob URLs and nothing else — a
+ * custom scheme fails before a byte is read, with a "format error" that is
+ * really "unknown protocol". Images do not go through GStreamer and are fine.
+ */
+function playsFromAsset(attachment: Attachment): boolean {
+  return isMac || (attachment.kind !== "video" && attachment.kind !== "audio");
+}
+
+/**
+ * Past this, a video on Linux shows as a file tile rather than a preview:
+ * making a blob of it reads the whole file into the web view's memory.
+ */
+const BLOB_LIMIT = 256 * 1024 * 1024;
+
+/** Blob URLs already made, by asset URL, oldest first — so a tile re-rendering
+ * as the selection moves does not read the file again. */
+const blobs = new Map<string, Promise<string>>();
+const KEEP_BLOBS = 8;
+
+/** The file at `url` as a `blob:` URL, which WebKitGTK's media player will load. */
+function viaBlob(url: string, bytes: number): Promise<string> {
+  if (bytes > BLOB_LIMIT) return Promise.reject(new Error("too large to preview"));
+  const cached = blobs.get(url);
+  if (cached) return cached;
+  const made = fetch(url)
+    .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(r.statusText))))
+    .then((blob) => URL.createObjectURL(blob));
+  made.catch(() => blobs.delete(url));
+  blobs.set(url, made);
+  while (blobs.size > KEEP_BLOBS) {
+    const [oldest, gone] = blobs.entries().next().value!;
+    blobs.delete(oldest);
+    gone.then((u) => URL.revokeObjectURL(u)).catch(() => {});
+  }
+  return made;
 }
 
 /**

@@ -9,6 +9,8 @@ mod login;
 mod paste;
 mod store;
 mod typed;
+#[cfg(target_os = "linux")]
+mod x11;
 
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -34,6 +36,7 @@ const PALETTE_TOP_RATIO: f64 = 0.22;
 
 /// Must match `--palette-radius` in the stylesheet, or the blur layer and the
 /// HTML surface will disagree at the corners.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const PALETTE_CORNER_RADIUS: f64 = 14.0;
 
 // ---------------------------------------------------------------- commands
@@ -251,7 +254,7 @@ fn reveal_path(path: String) {
         .spawn();
 
     #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+    reveal_on_linux(std::path::Path::new(&path));
 
     #[cfg(target_os = "windows")]
     let _ = std::process::Command::new("explorer")
@@ -443,8 +446,8 @@ async fn deliver_payload(
     // had focus back deliberately, then give it a moment to actually take it.
     if !copy_only {
         let previous = app.state::<AppState>().previous_app.lock().unwrap().take();
-        if let Some(pid) = previous {
-            let _ = on_main(&app, move || focus::activate_pid(pid));
+        if let Some(target) = previous {
+            let _ = on_main(&app, move || focus::activate(target));
             std::thread::sleep(Duration::from_millis(60));
         }
     }
@@ -636,17 +639,56 @@ fn reveal_library() {
         .arg(store::library_path())
         .spawn();
 
-    // No portable "reveal this file" exists, so open the folder containing it.
     #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open")
-        .arg(store::config_dir())
-        .spawn();
+    reveal_on_linux(&store::library_path());
 
     #[cfg(target_os = "windows")]
     let _ = std::process::Command::new("explorer")
         .arg("/select,")
         .arg(store::library_path())
         .spawn();
+}
+
+/// Show `path` selected in the file manager.
+///
+/// There is no `open -R`, but there is a D-Bus interface every mainstream file
+/// manager implements for exactly this (`org.freedesktop.FileManager1`). Where
+/// nothing answers it, open the folder instead: `xdg-open` on the file itself
+/// would launch whatever app opens it, which is not what "reveal" means.
+#[cfg(target_os = "linux")]
+fn reveal_on_linux(path: &std::path::Path) {
+    use std::process::{Command, Stdio};
+    let path = path.to_path_buf();
+    // Off the calling thread: `gdbus` waits for the file manager to start.
+    std::thread::spawn(move || {
+        let Ok(uri) = gtk::glib::filename_to_uri(&path, None) else {
+            return;
+        };
+        let shown = Command::new("gdbus")
+            .args([
+                "call",
+                "--session",
+                "--dest",
+                "org.freedesktop.FileManager1",
+                "--object-path",
+                "/org/freedesktop/FileManager1",
+                "--method",
+                "org.freedesktop.FileManager1.ShowItems",
+            ])
+            .arg(format!("['{}']", uri.replace('\'', "%27")))
+            .arg("")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !shown {
+            let folder = match path.is_dir() {
+                true => path.clone(),
+                false => path.parent().map(|p| p.to_path_buf()).unwrap_or(path.clone()),
+            };
+            let _ = Command::new("xdg-open").arg(folder).spawn();
+        }
+    });
 }
 
 // ---------------------------------------------------------------- windows
@@ -682,14 +724,11 @@ fn position_palette(app: &AppHandle, win: &tauri::WebviewWindow) {
 
 /// Note who currently has focus so [`deliver`] can hand it back.
 ///
-/// Skips our own process: opening the palette twice in a row must not record
+/// Skips our own windows: opening the palette twice in a row must not record
 /// Reze as the app to paste into.
 fn remember_frontmost(app: &AppHandle) {
-    let ours = std::process::id() as i32;
-    if let Some(pid) = focus::frontmost_pid() {
-        if pid != ours {
-            *app.state::<AppState>().previous_app.lock().unwrap() = Some(pid);
-        }
+    if let Some(target) = focus::frontmost_elsewhere() {
+        *app.state::<AppState>().previous_app.lock().unwrap() = Some(target);
     }
 }
 
@@ -701,6 +740,38 @@ fn reveal_palette(app: &AppHandle) {
     position_palette(app, &win);
     let _ = win.show();
     let _ = win.set_focus();
+    #[cfg(target_os = "linux")]
+    focus_on_x11(&win);
+}
+
+/// Give the palette the keyboard, which `set_focus` alone does not on X11.
+///
+/// Window managers with focus-stealing prevention — GNOME's included — map a
+/// window a background app shows but leave the keyboard where it was, since an
+/// app nobody is using asking for focus is precisely what that feature exists
+/// to refuse. Here the user did ask, by pressing the hotkey, so ask the way a
+/// pager would: see [`x11::activate`].
+#[cfg(target_os = "linux")]
+fn focus_on_x11(win: &tauri::WebviewWindow) {
+    let handle = win.clone();
+    let _ = win.run_on_main_thread(move || {
+        use gtk::glib::Cast;
+        use gtk::prelude::WidgetExt;
+        let Some(xid) = handle
+            .gtk_window()
+            .ok()
+            .and_then(|w| w.window())
+            .and_then(|w| w.downcast::<gdkx11::X11Window>().ok())
+            .map(|w| w.xid() as u32)
+        else {
+            return;
+        };
+        // Off the main thread: the window has to finish mapping first, and
+        // that happens on this thread once the closure returns.
+        std::thread::spawn(move || {
+            x11::activate(xid);
+        });
+    });
 }
 
 /// Which of the two things the palette is currently showing.
@@ -769,6 +840,10 @@ fn run_expand(app: &AppHandle) -> Result<(), String> {
         return Err("accessibility-denied".into());
     }
 
+    // The app being typed into is the one to paste back into — not whichever
+    // one the palette was last opened over and then closed without pasting.
+    *app.state::<AppState>().previous_app.lock().unwrap() = focus::frontmost();
+
     let library = store::load()?;
     let names: Vec<String> = library.macros.iter().map(|m| m.name.clone()).collect();
     if names.is_empty() {
@@ -792,6 +867,10 @@ fn run_expand(app: &AppHandle) -> Result<(), String> {
             // Everything from the trigger to the caret goes; whatever the user
             // typed after it comes back on the other side of the expansion.
             let doomed = buffer[start..].chars().count();
+            // Only now, with the buffer safely read: on X11 a keystroke sent
+            // while the hotkey is still down combines with its modifiers, or
+            // goes to the hotkey's grab instead of the app.
+            focus::wait_for_hotkey_release();
             on_main(app, move || paste::send(paste::Chord::Backspace, doomed))
                 .and_then(|inner| inner)?;
             typed::drop_last(doomed);
@@ -814,6 +893,12 @@ fn run_expand(app: &AppHandle) -> Result<(), String> {
     // Needed when the buffer is cold — text typed before Reze started, or
     // pasted in rather than typed.
     //
+    // Never in a Linux terminal, where the Ctrl+C this sends is SIGINT to
+    // whatever is running rather than a copy.
+    if focus::frontmost_is_terminal() {
+        return Err("a terminal line can only be expanded from what was seen typed".into());
+    }
+    //
     // From here to the end this borrows the clipboard and synthesizes a ⌘C, so
     // the history is held quiet: the words in front of your caret are not
     // something you copied.
@@ -831,6 +916,8 @@ fn run_expand(app: &AppHandle) -> Result<(), String> {
     if before.is_none() {
         let _ = paste::write_clipboard(paste::SENTINEL);
     }
+
+    focus::wait_for_hotkey_release();
 
     on_main(app, move || -> Result<(), String> {
         paste::send(paste::Chord::ExtendWordLeft, span)?;

@@ -6,7 +6,93 @@
 //! looks exactly like the paste silently failing. So we remember the app
 //! ourselves and put it back deliberately before pressing anything.
 
+/// Whatever identifies "where the user was": a process on macOS, where apps
+/// are activated as a whole, and a top-level window on X11, where focus
+/// belongs to windows — see [`crate::x11`].
+#[cfg(target_os = "macos")]
+pub type Target = i32;
+#[cfg(not(target_os = "macos"))]
+pub type Target = u32;
+
+/// Where the user is working right now, if that is somewhere other than Reze.
+///
+/// Our own windows are skipped: opening the palette twice in a row must not
+/// record the palette as the place to paste into.
+pub fn frontmost_elsewhere() -> Option<Target> {
+    #[cfg(target_os = "macos")]
+    {
+        let ours = std::process::id() as i32;
+        frontmost_pid().filter(|pid| *pid != ours)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        crate::x11::active_window()
+            .filter(|w| crate::x11::window_pid(*w) != Some(std::process::id()))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+/// Where the user is working right now, even if that is one of our windows.
+pub fn frontmost() -> Option<Target> {
+    #[cfg(target_os = "macos")]
+    {
+        frontmost_pid()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        crate::x11::active_window()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+/// Bring `target` back to the front. Returns whether that was accepted.
+pub fn activate(target: Target) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        activate_pid(target)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        crate::x11::activate(target)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = target;
+        false
+    }
+}
+
+/// Whether the focused window is a terminal emulator.
+///
+/// Always `false` on macOS, where it makes no difference: ⌘V pastes and ⌘C
+/// copies in a terminal like anywhere else. On Linux both differ — see
+/// [`crate::x11::is_terminal`].
+pub fn frontmost_is_terminal() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::x11::active_window().is_some_and(crate::x11::is_terminal)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+/// Let go of the hotkey before any keystrokes are synthesized. Only X11 needs
+/// this — see [`crate::x11::wait_for_keys_released`].
+pub fn wait_for_hotkey_release() {
+    #[cfg(target_os = "linux")]
+    crate::x11::wait_for_keys_released(std::time::Duration::from_secs(1));
+}
+
 /// PID of the frontmost application, or `None` if that cannot be determined.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn frontmost_pid() -> Option<i32> {
     #[cfg(target_os = "macos")]
     {
@@ -21,6 +107,7 @@ pub fn frontmost_pid() -> Option<i32> {
 }
 
 /// Bring `pid` back to the front. Returns whether the activation was accepted.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn activate_pid(pid: i32) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -55,7 +142,13 @@ pub fn pasteboard_change_count() -> Option<isize> {
         use objc2_app_kit::NSPasteboard;
         Some(NSPasteboard::generalPasteboard().changeCount())
     }
-    #[cfg(not(target_os = "macos"))]
+    // X11 has no counter, but it does announce every change of clipboard
+    // owner, and [`crate::clip`] counts those.
+    #[cfg(target_os = "linux")]
+    {
+        crate::clip::change_count()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         None
     }
@@ -68,10 +161,16 @@ pub fn pasteboard_change_count() -> Option<isize> {
 /// it is the same inference every clipboard manager makes, and it is right
 /// except when you copy and switch apps inside the same half second.
 pub struct FrontApp {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub pid: i32,
-    /// Empty for the rare process without one, e.g. a bare executable.
+    /// Empty for the rare process without one, e.g. a bare executable. On
+    /// Linux, the app's desktop entry id, or failing that its `WM_CLASS`.
     pub bundle_id: String,
     pub name: String,
+    /// The X11 window it was read from, which is where its icon lives. Zero on
+    /// macOS, where the icon belongs to the process.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub window: u32,
 }
 
 pub fn frontmost_app() -> Option<FrontApp> {
@@ -83,9 +182,26 @@ pub fn frontmost_app() -> Option<FrontApp> {
             pid: app.processIdentifier(),
             bundle_id: app.bundleIdentifier().map(|s| s.to_string()).unwrap_or_default(),
             name: app.localizedName().map(|s| s.to_string()).unwrap_or_default(),
+            window: 0,
         })
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        let window = crate::x11::active_window()?;
+        let (instance, class) = crate::x11::window_class(window).unwrap_or_default();
+        let (bundle_id, name) = crate::x11::app_identity(&instance, &class).unwrap_or_else(|| {
+            let id = if instance.is_empty() { class.clone() } else { instance.clone() };
+            let name = if class.is_empty() { instance.clone() } else { class.clone() };
+            (id, name)
+        });
+        Some(FrontApp {
+            pid: crate::x11::window_pid(window).map(|p| p as i32).unwrap_or(0),
+            bundle_id,
+            name,
+            window,
+        })
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         None
     }
@@ -96,9 +212,10 @@ pub fn frontmost_app() -> Option<FrontApp> {
 /// Separate from [`frontmost_app`] because it is the expensive half — a decode
 /// and a re-encode — and the caller only needs it the first time it sees a
 /// given app.
-pub fn app_icon_png(pid: i32) -> Option<Vec<u8>> {
+pub fn app_icon_png(front: &FrontApp) -> Option<Vec<u8>> {
     #[cfg(target_os = "macos")]
     {
+        let pid = front.pid;
         use objc2::rc::Retained;
         use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSRunningApplication};
         use objc2_foundation::NSDictionary;
@@ -152,9 +269,15 @@ pub fn app_icon_png(pid: i32) -> Option<Vec<u8>> {
         }?;
         Some(png.to_vec())
     }
-    #[cfg(not(target_os = "macos"))]
+    // The window's own icon property. The badge is drawn at 16pt, so 64px
+    // covers a 2× display the same as on macOS.
+    #[cfg(target_os = "linux")]
     {
-        let _ = pid;
+        crate::x11::window_icon_png(front.window, 64)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = front;
         None
     }
 }

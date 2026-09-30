@@ -3,7 +3,9 @@
 //! macOS will not tell us the pasteboard changed — there is no notification, no
 //! callback, nothing to subscribe to. The only signal is `changeCount`, a
 //! number that goes up. So this polls, the way every clipboard manager on the
-//! platform does, and reads the pasteboard whenever that number moves.
+//! platform does, and reads the pasteboard whenever that number moves. X11
+//! does announce changes, and [`crate::clip`] turns those announcements into
+//! the same kind of number, so one loop serves both.
 //!
 //! Two things follow from that, and they are most of this module:
 //!
@@ -327,10 +329,12 @@ pub fn clear() {
     persist(&history);
 }
 
-/// Start watching the pasteboard. Does nothing useful off macOS, where there is
-/// no change count to watch.
+/// Start watching the pasteboard. Must be called on the main thread, where
+/// Linux's change counter hooks into GTK. Does nothing useful where there is no
+/// change count to watch.
 pub fn start(app: tauri::AppHandle) {
     let _ = std::fs::create_dir_all(icons_dir());
+    crate::clip::watch();
     SEEN.store(change_count(), Ordering::SeqCst);
 
     std::thread::spawn(move || loop {
@@ -528,7 +532,7 @@ fn source_now() -> Option<Source> {
             let name = format!("{key}.png");
             let path = icons_dir().join(&name);
             if !path.exists() {
-                if let Some(png) = crate::focus::app_icon_png(app.pid) {
+                if let Some(png) = crate::focus::app_icon_png(&app) {
                     let _ = std::fs::create_dir_all(icons_dir());
                     let _ = std::fs::write(&path, png);
                 }
@@ -623,6 +627,7 @@ mod tests {
             pid: 0,
             bundle_id: bundle.into(),
             name: name.into(),
+            window: 0,
         };
         assert_eq!(icon_key(&app("com.apple.Safari", "Safari")).unwrap(), "com.apple.Safari");
         // No bundle id: the name has to do, sanitised.

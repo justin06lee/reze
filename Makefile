@@ -1,8 +1,12 @@
 APP       := Reze
 BUNDLE_ID := com.huiyunlee.reze
-BUNDLE    := src-tauri/target/release/bundle/macos/$(APP).app
+UNAME     := $(shell uname -s)
 
 .PHONY: all build install update stop reset-permissions launch
+
+ifeq ($(UNAME),Darwin)
+
+BUNDLE    := src-tauri/target/release/bundle/macos/$(APP).app
 
 all: stop reset-permissions build install launch
 
@@ -32,3 +36,52 @@ reset-permissions:
 
 launch:
 	open /Applications/$(APP).app
+
+else
+
+# Linux (X11). Everything goes under ~/.local, so no step needs root: the
+# binary on PATH, a desktop entry and icons so it shows in the app grid.
+# The frontend is embedded in the binary, so the binary is the whole app —
+# no bundle is built (`--no-bundle`); a .deb or AppImage would only wrap it.
+PREFIX  := $(HOME)/.local
+BIN     := $(PREFIX)/bin/reze
+APPS    := $(PREFIX)/share/applications
+ICONS   := $(PREFIX)/share/icons/hicolor
+
+all: stop build install launch
+
+build:
+	bun install
+	bun run tauri build --no-bundle
+
+install:
+	install -Dm755 src-tauri/target/release/reze $(BIN)
+	install -Dm644 src-tauri/icons/32x32.png $(ICONS)/32x32/apps/reze.png
+	install -Dm644 src-tauri/icons/64x64.png $(ICONS)/64x64/apps/reze.png
+	install -Dm644 src-tauri/icons/128x128.png $(ICONS)/128x128/apps/reze.png
+	install -Dm644 src-tauri/icons/128x128@2x.png $(ICONS)/256x256/apps/reze.png
+	install -Dm644 src-tauri/icons/icon.png $(ICONS)/512x512/apps/reze.png
+	mkdir -p $(APPS)
+	sed 's|@BIN@|$(BIN)|' assets/reze.desktop > $(APPS)/reze.desktop
+	-update-desktop-database -q $(APPS)
+	-gtk-update-icon-cache -q -t $(ICONS)
+
+update: all
+
+stop:
+	-pkill -x reze
+
+# No permission to reset: X11 lets any client synthesize input.
+reset-permissions:
+
+# Detached, so it outlives the terminal `make` ran in. Skipped over plain SSH,
+# where there is no display to put a tray icon on.
+launch:
+	@if [ -n "$$DISPLAY" ]; then \
+		setsid -f $(BIN) >/dev/null 2>&1 </dev/null; \
+		echo "Reze is running — look for the bomb in the top bar."; \
+	else \
+		echo "No display here; start Reze from the app grid."; \
+	fi
+
+endif

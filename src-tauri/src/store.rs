@@ -77,13 +77,25 @@ fn default_folders() -> Vec<String> {
     vec![config_dir().join("media").to_string_lossy().to_string()]
 }
 
+/// ⌥Space on macOS. Not Alt+Space on Linux, where GNOME, KDE and most window
+/// managers already hold it for the window menu, and a key another client has
+/// grabbed cannot be grabbed again.
 fn default_expand_hotkey() -> String {
-    "Alt+Space".into()
+    match cfg!(target_os = "macos") {
+        true => "Alt+Space".into(),
+        false => "Control+Alt+Space".into(),
+    }
 }
 
-/// ⌘⇧V, which is what every clipboard manager on the platform uses.
+/// ⌘⇧V, which is what every clipboard manager on macOS uses. Not Ctrl+Shift+V
+/// on Linux: that is paste in every terminal, and grabbing it globally would
+/// take paste away from all of them. Super+Shift+V is what GNOME's clipboard
+/// extensions settled on instead.
 fn default_clipboard_hotkey() -> String {
-    "CmdOrCtrl+Shift+V".into()
+    match cfg!(target_os = "macos") {
+        true => "CmdOrCtrl+Shift+V".into(),
+        false => "Super+Shift+V".into(),
+    }
 }
 
 fn default_true() -> bool {
@@ -153,9 +165,10 @@ pub fn library_path() -> PathBuf {
 /// saves apart from a real external edit (otherwise every save round-trips).
 pub struct AppState {
     pub last_written: Mutex<String>,
-    /// PID of whatever was frontmost when the palette opened, so focus can be
-    /// handed back deliberately rather than hoped for.
-    pub previous_app: Mutex<Option<i32>>,
+    /// Whatever was frontmost when the palette opened — a PID on macOS, a
+    /// window on X11 — so focus can be handed back deliberately rather than
+    /// hoped for.
+    pub previous_app: Mutex<Option<crate::focus::Target>>,
 }
 
 impl AppState {

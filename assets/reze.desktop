@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Reze
+GenericName=Prompt Macros
+Comment=Turn short triggers into full prompts
+Exec=@BIN@
+Icon=reze
+Terminal=false
+Categories=Utility;
+Keywords=prompt;macro;snippet;expand;clipboard;
+StartupWMClass=reze
