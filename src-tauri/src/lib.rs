@@ -1,11 +1,18 @@
+mod assets;
+mod clip;
 mod expand;
 mod focus;
+mod folders;
+mod grab;
 mod login;
 mod paste;
 mod store;
 mod typed;
 
+use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
@@ -30,20 +37,49 @@ const PALETTE_CORNER_RADIUS: f64 = 14.0;
 
 // ---------------------------------------------------------------- commands
 
+/// The library as the windows see it: the macros you wrote, followed by the
+/// ones the [watched folders](folders) contain.
+///
+/// Authored first so that where a trigger name is claimed twice, the one you
+/// wrote deliberately wins over a file that happens to share its name —
+/// expand-in-place takes the first match.
+fn merged() -> Result<Library, String> {
+    let mut library = store::load()?;
+    let derived = folders::scan(&library.settings.folders, &library.folder_usage);
+    library.macros.extend(derived);
+    Ok(library)
+}
+
 #[tauri::command]
 fn get_library() -> Result<Library, String> {
-    store::load()
+    merged()
 }
 
 #[tauri::command]
 fn save_library(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
-    library: Library,
+    mut library: Library,
 ) -> Result<(), String> {
+    // Folder macros are rebuilt from the folder on every scan. Writing them here
+    // would persist a snapshot that goes stale the moment a file is renamed, and
+    // that the next scan would then duplicate.
+    library.macros.retain(|m| m.folder.is_none());
+
+    let previous_folders = store::load().map(|l| l.settings.folders).unwrap_or_default();
     let written = store::save(&library)?;
     *state.last_written.lock().unwrap() = written;
-    app.emit("library-changed", &library).ok();
+    // Saving is the only moment the set of referenced files can shrink, so it is
+    // the only moment worth looking for orphans.
+    assets::sweep(&library);
+
+    if previous_folders != library.settings.folders {
+        watch_folders(&app, &library.settings.folders);
+    }
+
+    // Hand back the merged view, not what was written — the windows must not
+    // lose their folder macros just because they saved an edit to another one.
+    app.emit("library-changed", &merged().unwrap_or(library)).ok();
     Ok(())
 }
 
@@ -51,8 +87,14 @@ fn save_library(
 #[tauri::command]
 fn bump_usage(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
     let mut lib = store::load()?;
-    if let Some(m) = lib.macros.iter_mut().find(|m| m.id == id) {
+    if id.starts_with("folder:") {
+        // A folder macro is not in this file and cannot carry its own count —
+        // see `Library::folder_usage`.
+        *lib.folder_usage.entry(id).or_insert(0) += 1;
+    } else if let Some(m) = lib.macros.iter_mut().find(|m| m.id == id) {
         m.usage_count += 1;
+    } else {
+        return Ok(()); // gone since the palette listed it; nothing to record
     }
     let written = store::save(&lib)?;
     *state.last_written.lock().unwrap() = written;
@@ -101,9 +143,237 @@ fn open_accessibility_settings() {
     }
 }
 
-/// Hide the palette, then deliver `text` to whatever app regained focus.
+// ------------------------------------------------------------ attachments
+
+/// Where attachment files live, so the frontend can build `asset://` URLs for
+/// its previews. A directory rather than a URL per file: the stored name is
+/// already all the library carries, and joining it here would mean a round trip
+/// per thumbnail.
 #[tauri::command]
-async fn deliver(app: AppHandle, text: String, copy_only: bool) -> Result<(), String> {
+fn assets_dir() -> String {
+    assets::assets_dir().to_string_lossy().to_string()
+}
+
+/// Copy files at `paths` into the asset library. Used by the file picker and by
+/// files dropped onto the editor window.
+///
+/// Partial success is the useful behaviour: dropping ten files of which one is a
+/// folder should attach the nine, not refuse all of them. Anything skipped comes
+/// back in `errors` so the editor can say what happened rather than silently
+/// attaching fewer things than were dropped.
+#[tauri::command]
+fn import_files(paths: Vec<String>) -> Imported {
+    let mut out = Imported::default();
+    for path in paths {
+        match assets::import_path(std::path::Path::new(&path)) {
+            Ok(a) => out.attachments.push(a),
+            Err(e) => out.errors.push(e),
+        }
+    }
+    out
+}
+
+/// Turn whatever media is on the clipboard into attachments.
+///
+/// Read natively rather than from the webview's `paste` event: a file copied in
+/// Finder reaches the real pasteboard as a URL and the webview as nothing at
+/// all, and a screenshot arrives as data the webview may or may not hand over.
+#[tauri::command]
+fn import_clipboard() -> Imported {
+    let mut out = Imported::default();
+    for item in clip::read_media() {
+        let result = match item {
+            clip::Incoming::File(path) => assets::import_path(&path),
+            clip::Incoming::Data { mime, bytes } => {
+                let ext = assets::ext_for_mime(&mime);
+                // Nothing on the pasteboard carries a filename, so give it one
+                // that says where it came from.
+                assets::import_bytes(&format!("Clipboard.{ext}"), ext, &bytes)
+            }
+        };
+        match result {
+            Ok(a) => out.attachments.push(a),
+            Err(e) => out.errors.push(e),
+        }
+    }
+    out
+}
+
+/// The outcome of an import: what made it in, and why anything else did not.
+#[derive(Default, serde::Serialize)]
+struct Imported {
+    attachments: Vec<assets::Attachment>,
+    errors: Vec<String>,
+}
+
+/// Resolve attachments to real paths, dropping any that no longer exist.
+///
+/// A file deleted out from under the library must not fail the whole paste —
+/// the text half is still worth delivering — and a watched folder on an
+/// unplugged drive is exactly that case.
+fn attachment_paths(attachments: &[assets::Attachment]) -> Vec<PathBuf> {
+    attachments
+        .iter()
+        .filter_map(|a| assets::resolve(a).ok())
+        .filter(|p| p.exists())
+        .collect()
+}
+
+// ---------------------------------------------------------------- folders
+
+/// Replace the watched folder list, then rescan.
+#[tauri::command]
+fn set_folders(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    folders: Vec<String>,
+) -> Result<(), String> {
+    let mut library = store::load()?;
+    library.settings.folders = folders;
+    let written = store::save(&library)?;
+    *state.last_written.lock().unwrap() = written;
+
+    watch_folders(&app, &library.settings.folders);
+    app.emit("library-changed", &merged()?).ok();
+    Ok(())
+}
+
+/// Show a file or folder in Finder. Used for both the library and the watched
+/// folders, which is why it takes a path rather than knowing one.
+#[tauri::command]
+fn reveal_path(path: String) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open")
+        .arg("-R")
+        .arg(&path)
+        .spawn();
+
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer")
+        .arg(format!("/select,{path}"))
+        .spawn();
+}
+
+// ------------------------------------------------------------------ grab
+
+/// Which download tools are installed, so Settings can say what is missing.
+#[tauri::command]
+fn grab_tools() -> grab::Tools {
+    grab::tools()
+}
+
+/// One grab at a time.
+///
+/// Not just politeness: `gallery-dl` is identified by which files appeared in
+/// the folder while it ran, and two overlapping downloads would each claim the
+/// other's. It doubles as the "do not hide the palette" flag — a window that
+/// vanished mid-download would take the naming step with it.
+#[derive(Default)]
+pub struct Grabbing(AtomicBool);
+
+/// A finished download, ready to be previewed and named.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Grabbed {
+    /// Where it landed. Handed back so the rename knows what to move.
+    path: String,
+    /// What to put in the naming field: the filename without its extension.
+    suggested_name: String,
+    /// So the palette can preview it with the same component as everything else.
+    attachment: assets::Attachment,
+}
+
+/// Download whatever `url` points at into the first watched folder.
+///
+/// Awaited by the palette rather than fired and forgotten, because the whole
+/// point of doing this from the palette is that there is somewhere to show
+/// progress and somewhere to ask what to call the result.
+#[tauri::command]
+async fn grab_url(app: AppHandle, url: String) -> Result<Grabbed, String> {
+    if app.state::<Grabbing>().0.swap(true, Ordering::SeqCst) {
+        return Err("Already downloading something.".into());
+    }
+    // A guard rather than clearing at each exit: `?` below must not leave the
+    // flag set, or grabbing would be dead for the rest of the session.
+    struct Release(AppHandle);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.state::<Grabbing>().0.store(false, Ordering::SeqCst);
+        }
+    }
+    let _release = Release(app.clone());
+
+    let library = store::load()?;
+    let dir = folders::download_dir(&library.settings.folders)?;
+    // `download_dir` creates the folder if it was missing, and a folder that did
+    // not exist at launch is neither watched nor allowed to be previewed. This is
+    // the one moment that set can change by our own doing, so re-point both.
+    watch_folders(&app, &library.settings.folders);
+
+    let result = tauri::async_runtime::spawn_blocking(move || grab::grab(&url, &dir))
+        .await
+        .map_err(|e| e.to_string())??;
+
+    let bytes = std::fs::metadata(&result.path).map(|m| m.len()).unwrap_or(0);
+    let grabbed = Grabbed {
+        suggested_name: result
+            .path
+            .file_stem()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        attachment: assets::referencing(&result.path, bytes),
+        path: result.path.to_string_lossy().to_string(),
+    };
+
+    // It is already a macro — the folder watcher will say so too, but not for
+    // another few hundred milliseconds, and the palette is showing it now.
+    if let Ok(library) = merged() {
+        let _ = app.emit("library-changed", &library);
+    }
+    Ok(grabbed)
+}
+
+/// Rename a just-grabbed file, which is what renames the macro made from it.
+#[tauri::command]
+fn rename_grab(app: AppHandle, path: String, name: String) -> Result<String, String> {
+    let from = PathBuf::from(&path);
+    let parent = from.parent().ok_or("that file has nowhere to live")?;
+
+    // The path came from us a moment ago, but it arrives back over IPC, so it
+    // is checked rather than trusted: renaming is only ever allowed inside a
+    // folder the user asked us to watch.
+    let watched = folders::existing(&store::load()?.settings.folders);
+    if !watched.iter().any(|dir| parent.starts_with(dir)) {
+        return Err("that file is not in a watched folder".into());
+    }
+
+    let extension = from
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let to = grab::unique_named(parent, &name, &extension);
+    if to != from {
+        std::fs::rename(&from, &to).map_err(|e| format!("renaming: {e}"))?;
+    }
+
+    if let Ok(library) = merged() {
+        let _ = app.emit("library-changed", &library);
+    }
+    Ok(to.to_string_lossy().to_string())
+}
+
+/// Hide the palette, then deliver `text` and `attachments` to whatever app
+/// regained focus.
+#[tauri::command]
+async fn deliver(
+    app: AppHandle,
+    text: String,
+    copy_only: bool,
+    attachments: Vec<assets::Attachment>,
+) -> Result<(), String> {
     // Checked before hiding, not inside the worker: an error raised after the
     // window is gone is an error the user never sees. Missing Accessibility is
     // the single most likely failure — and it silently recurs after every
@@ -111,6 +381,8 @@ async fn deliver(app: AppHandle, text: String, copy_only: bool) -> Result<(), St
     if !copy_only && !paste::has_accessibility() {
         return Err("accessibility-denied".into());
     }
+
+    let files = attachment_paths(&attachments);
 
     if let Some(win) = app.get_webview_window(PALETTE) {
         let _ = win.hide();
@@ -135,9 +407,9 @@ async fn deliver(app: AppHandle, text: String, copy_only: bool) -> Result<(), St
     let worker = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         if copy_only {
-            paste::write_clipboard(&text)
+            paste::copy_only(&text, &files)
         } else {
-            paste::paste(&text, restore, |f| {
+            paste::paste(&text, &files, restore, |f| {
                 on_main(&worker, f).and_then(|inner| inner)
             })
         }
@@ -217,8 +489,8 @@ fn resize_palette(app: AppHandle, height: f64) {
 /// without re-reading the library from disk on every keypress.
 #[derive(Default)]
 struct Hotkeys {
-    palette: std::sync::Mutex<Option<Shortcut>>,
-    expand: std::sync::Mutex<Option<Shortcut>>,
+    palette: Mutex<Option<Shortcut>>,
+    expand: Mutex<Option<Shortcut>>,
 }
 
 #[tauri::command]
@@ -241,12 +513,11 @@ fn register_hotkeys(app: &AppHandle, palette: &str, expand: &str) -> Result<(), 
         .unregister_all()
         .map_err(|e| e.to_string())?;
 
-    app.global_shortcut()
-        .register(palette_shortcut)
-        .map_err(|e| format!("could not register {palette}: {e}"))?;
-    app.global_shortcut()
-        .register(expand_shortcut)
-        .map_err(|e| format!("could not register {expand}: {e}"))?;
+    for (accelerator, shortcut) in [(palette, palette_shortcut), (expand, expand_shortcut)] {
+        app.global_shortcut()
+            .register(shortcut)
+            .map_err(|e| format!("could not register {accelerator}: {e}"))?;
+    }
 
     let state = app.state::<Hotkeys>();
     *state.palette.lock().unwrap() = Some(palette_shortcut);
@@ -497,6 +768,62 @@ struct Expansion {
     tail: String,
 }
 
+// -------------------------------------------------------- folder watcher
+
+/// Holds the watcher over the configured folders, so it can be replaced when
+/// the list changes. Dropping the old one is what stops it.
+#[derive(Default)]
+struct FolderWatch(Mutex<Option<notify::RecommendedWatcher>>);
+
+/// How long the folders must be quiet before a rescan.
+///
+/// Copying fifty files in produces fifty events; rescanning on each would mean
+/// fifty walks of the tree and fifty repaints for one gesture.
+const FOLDER_SETTLE: Duration = Duration::from_millis(400);
+
+/// Watch `folders` and rebroadcast the library whenever their contents change.
+///
+/// Replaces any previous watch wholesale. The old watcher is dropped, which
+/// closes its channel, which ends the thread draining it — so changing the
+/// folder list leaves nothing behind.
+fn watch_folders(app: &AppHandle, folders: &[String]) {
+    let dirs = folders::existing(folders);
+    let (tx, rx) = channel();
+    let Ok(mut watcher) = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if res.is_ok() {
+            let _ = tx.send(());
+        }
+    }) else {
+        return;
+    };
+    for dir in &dirs {
+        if let Err(e) = watcher.watch(dir, RecursiveMode::Recursive) {
+            eprintln!("reze: not watching {dir:?}: {e}");
+        }
+        // The previews are drawn from these files directly, and the asset
+        // protocol refuses anything outside its scope. Widening it to a folder
+        // the user chose is the same trust we already extend to the asset
+        // library: the web view only ever loads our own bundled code, and no
+        // remote content runs in it.
+        if let Err(e) = app.asset_protocol_scope().allow_directory(dir, true) {
+            eprintln!("reze: no previews for {dir:?}: {e}");
+        }
+    }
+
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        while rx.recv().is_ok() {
+            // Swallow the rest of the burst before doing any work.
+            while rx.recv_timeout(FOLDER_SETTLE).is_ok() {}
+            if let Ok(library) = merged() {
+                let _ = handle.emit("library-changed", &library);
+            }
+        }
+    });
+
+    *app.state::<FolderWatch>().0.lock().unwrap() = Some(watcher);
+}
+
 // ---------------------------------------------------------------- watcher
 
 /// Reload and broadcast whenever the library file changes underneath us,
@@ -538,7 +865,9 @@ fn spawn_watcher(app: AppHandle) {
             }
             match serde_json::from_str::<Library>(&raw) {
                 Ok(lib) => {
-                    let _ = app.emit("library-changed", &lib);
+                    // Merged, not as parsed: the file holds only what was
+                    // authored, and the windows need the folder macros with it.
+                    let _ = app.emit("library-changed", &merged().unwrap_or(lib));
                 }
                 Err(e) => {
                     let _ = app.emit("library-error", e.to_string());
@@ -554,6 +883,7 @@ fn spawn_watcher(app: AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -575,6 +905,8 @@ pub fn run() {
         )
         .manage(AppState::new())
         .manage(Hotkeys::default())
+        .manage(Grabbing::default())
+        .manage(FolderWatch::default())
         .invoke_handler(tauri::generate_handler![
             get_library,
             save_library,
@@ -595,6 +927,14 @@ pub fn run() {
             set_hotkeys,
             library_path,
             reveal_library,
+            assets_dir,
+            import_files,
+            import_clipboard,
+            set_folders,
+            reveal_path,
+            grab_tools,
+            grab_url,
+            rename_grab,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -602,12 +942,25 @@ pub fn run() {
 
             let handle = app.handle().clone();
 
+            // Attachment previews are drawn straight from disk over `asset://`.
+            // Granted here rather than as a config glob because the directory
+            // hangs off the real home directory, which only the running process
+            // can resolve without guessing.
+            {
+                let dir = assets::assets_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                if let Err(e) = handle.asset_protocol_scope().allow_directory(&dir, false) {
+                    eprintln!("reze: attachment previews unavailable ({e})");
+                }
+            }
+
             let lib = store::load().unwrap_or_default();
             if let Ok(body) = store::serialize(&lib) {
                 *app.state::<AppState>().last_written.lock().unwrap() = body;
             }
 
-            if let Err(e) = register_hotkeys(&handle, &lib.settings.hotkey, &lib.settings.expand_hotkey)
+            if let Err(e) =
+                register_hotkeys(&handle, &lib.settings.hotkey, &lib.settings.expand_hotkey)
             {
                 eprintln!("reze: {e}");
             }
@@ -663,14 +1016,19 @@ pub fn run() {
                 );
             }
 
+            folders::ensure_ours(&lib.settings.folders);
+            watch_folders(&handle, &lib.settings.folders);
             spawn_watcher(handle);
             Ok(())
         })
         .on_window_event(|window, event| match event {
             // The palette is a transient overlay: losing focus means the user
-            // moved on, so get out of the way.
+            // moved on, so get out of the way — unless a download is running in
+            // it, which would take the progress and the naming step with it.
             WindowEvent::Focused(false) if window.label() == PALETTE => {
-                let _ = window.hide();
+                if !window.state::<Grabbing>().0.load(Ordering::SeqCst) {
+                    let _ = window.hide();
+                }
             }
             // Closing either window should not tear down the menu-bar app.
             WindowEvent::CloseRequested { api, .. } => {

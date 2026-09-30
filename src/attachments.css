@@ -1,0 +1,143 @@
+/* Attachment previews, shared by both windows.
+   The two stylesheets name their surfaces differently — `--sel` in the palette,
+   `--bg-input` in the editor — so everything here falls through both before
+   landing on a neutral grey that reads on either background. */
+
+.a-media {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 4px;
+}
+
+.a-video-still {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+
+/* Pure overlay: the frame underneath is the content, this only says it moves. */
+.a-play {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 10px;
+  padding-left: 2px; /* optical centring — a triangle's mass sits left */
+  pointer-events: none;
+}
+
+.a-audio {
+  width: 100%;
+  max-width: 240px;
+}
+
+/* Stand-in for a file with no visual form, and for one that has gone missing. */
+.a-glyph {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  min-height: 44px;
+  border-radius: 6px;
+  background: var(--sel, var(--bg-input, rgba(128, 128, 128, 0.16)));
+}
+
+.a-ext {
+  font: 600 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim, rgba(128, 128, 128, 0.8));
+}
+
+.a-glyph[data-missing] .a-ext {
+  color: var(--danger, #ff6b6b);
+}
+
+/* ---------------------------------------------------------------- tile */
+
+.a-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  width: 116px;
+  flex: none;
+}
+
+.a-frame {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 84px;
+  padding: 4px;
+  border-radius: 8px;
+  border: 1px solid var(--line, rgba(128, 128, 128, 0.2));
+  background: var(--sel, var(--bg-input, rgba(128, 128, 128, 0.1)));
+  overflow: hidden;
+}
+
+/* Sits over the corner of the thumbnail, so it never costs the tile any width. */
+.a-remove {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.a-tile:hover .a-remove,
+.a-remove:focus-visible {
+  opacity: 1;
+}
+
+.a-remove:hover {
+  background: var(--danger, #c0392b);
+}
+
+.a-tile figcaption {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.a-name {
+  font-size: 11px;
+  color: var(--fg-dim, rgba(128, 128, 128, 0.85));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.a-size {
+  font-size: 10px;
+  color: var(--fg-faint, rgba(128, 128, 128, 0.6));
+}
+
+.a-clip {
+  width: 11px;
+  height: 11px;
+  vertical-align: -1px;
+}

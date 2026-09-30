@@ -4,6 +4,7 @@
 //! the universal approach is: put the text on the clipboard, synthesize Cmd+V,
 //! then put the user's clipboard back. That requires Accessibility permission.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Whether this app is allowed to synthesize keystrokes.
@@ -49,7 +50,15 @@ pub fn write_clipboard(text: &str) -> Result<(), String> {
 /// caller restores the user's clipboard either way.
 pub const SENTINEL: &str = "\u{200b}reze-nothing-was-copied\u{200b}";
 
-/// Copy `text` to the clipboard and paste it into the frontmost app.
+/// Copy `text` and `files` to the clipboard and paste them into the frontmost app.
+///
+/// A pasteboard holds one payload, so a macro carrying both takes two passes:
+/// **text first, then the files**. That order leaves the text landing exactly
+/// where the caret already was — unchanged from a text-only macro, including
+/// the surrounding characters an in-place expansion puts back — and lets the
+/// attachments follow it. In a chat composer they drop into the attachment tray;
+/// in a document they land after the paragraph. Both are what you would have
+/// done by hand, in that order.
 ///
 /// The caller is responsible for having already hidden our window — macOS
 /// restores focus to the previous app on hide, and the paste lands wherever
@@ -64,24 +73,39 @@ pub const SENTINEL: &str = "\u{200b}reze-nothing-was-copied\u{200b}";
 /// UI is never blocked for the half second this takes.
 pub fn paste(
     text: &str,
+    files: &[PathBuf],
     restore_clipboard: bool,
-    run_on_main: impl FnOnce(fn() -> Result<(), String>) -> Result<(), String>,
+    run_on_main: impl Fn(fn() -> Result<(), String>) -> Result<(), String>,
 ) -> Result<(), String> {
     if !has_accessibility() {
         return Err("accessibility-denied".into());
     }
 
-    let previous = if restore_clipboard {
-        read_clipboard().ok()
-    } else {
-        None
+    // Only text is worth putting back. If the user had an image copied, the
+    // best we could restore is the empty string `get_text` gives for it — which
+    // would destroy the thing we were trying to preserve.
+    let previous = match restore_clipboard {
+        true => read_clipboard().ok().filter(|s| !s.is_empty()),
+        false => None,
     };
 
-    write_clipboard(text)?;
-    // Let the clipboard server and the focus change settle before the keystroke.
-    std::thread::sleep(Duration::from_millis(120));
+    if !text.is_empty() {
+        write_clipboard(text)?;
+        // Let the clipboard server and the focus change settle before the keystroke.
+        std::thread::sleep(Duration::from_millis(120));
+        run_on_main(send_paste_keystroke)?;
+    }
 
-    run_on_main(send_paste_keystroke)?;
+    if !files.is_empty() {
+        // The first paste has to have been read by the target app before the
+        // pasteboard is overwritten, or the second one arrives instead of it.
+        if !text.is_empty() {
+            std::thread::sleep(Duration::from_millis(280));
+        }
+        crate::clip::write_files(files)?;
+        std::thread::sleep(Duration::from_millis(140));
+        run_on_main(send_paste_keystroke)?;
+    }
 
     if let Some(prev) = previous {
         // Long enough that the target app has read the pasteboard already.
@@ -89,6 +113,18 @@ pub fn paste(
         let _ = write_clipboard(&prev);
     }
     Ok(())
+}
+
+/// Put the payload on the clipboard without pasting it — the ⌘↵ path.
+///
+/// One pasteboard, one payload: the text if there is any, otherwise the files.
+/// A macro carrying both cannot be copied as both, and silently dropping the
+/// text a user could actually see in the preview would be the worse half to lose.
+pub fn copy_only(text: &str, files: &[PathBuf]) -> Result<(), String> {
+    if text.is_empty() && !files.is_empty() {
+        return crate::clip::write_files(files);
+    }
+    write_clipboard(text)
 }
 
 /// The key combinations we synthesize. Named rather than exposing `enigo::Key`

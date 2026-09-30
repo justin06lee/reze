@@ -4,6 +4,7 @@
 //! It is watched for external edits so hand-editing in a text editor and
 //! editing in the app both work, and neither clobbers the other.
 
+use crate::assets::Attachment;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -22,6 +23,17 @@ pub struct Macro {
     pub tags: Vec<String>,
     /// The expansion. May contain `{{vars}}` and `{{> includes}}`.
     pub body: String,
+    /// Files pasted along with the body — images, video, anything. Defaulted so
+    /// libraries written before attachments existed still load.
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+    /// The watched folder this macro was derived from, if any.
+    ///
+    /// Derived macros are rebuilt from the folder on every scan and never
+    /// written back to `macros.json` — the folder is their source of truth, the
+    /// way this file is for the ones you wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
     #[serde(default)]
     pub usage_count: u64,
 }
@@ -38,9 +50,20 @@ pub struct Settings {
     /// where the text in front of the caret cannot be selected and read back.
     #[serde(default = "default_true")]
     pub track_typing: bool,
+    /// Folders whose files become macros on their own. See [`crate::folders`].
+    /// A link pasted into the palette is downloaded into the first one.
+    #[serde(default = "default_folders")]
+    pub folders: Vec<String>,
     /// "paste" simulates Cmd+V into the previous app; "copy" only fills the clipboard.
     pub paste_mode: String,
     pub restore_clipboard: bool,
+}
+
+/// Seeded rather than left empty so grabbing works the moment it is pressed,
+/// with somewhere obvious for the results to land. Point it at your own folder
+/// instead and this one stops being used.
+fn default_folders() -> Vec<String> {
+    vec![config_dir().join("media").to_string_lossy().to_string()]
 }
 
 fn default_expand_hotkey() -> String {
@@ -56,6 +79,7 @@ impl Default for Settings {
         Self {
             hotkey: "CmdOrCtrl+Shift+Space".into(),
             expand_hotkey: default_expand_hotkey(),
+            folders: default_folders(),
             track_typing: true,
             paste_mode: "paste".into(),
             restore_clipboard: true,
@@ -72,6 +96,13 @@ pub struct Library {
     pub settings: Settings,
     #[serde(default)]
     pub macros: Vec<Macro>,
+    /// Use counts for folder-derived macros, keyed by their id.
+    ///
+    /// They cannot live on the macro: it is rebuilt from the folder every scan,
+    /// so anything written on it is discarded. Kept here so a reference image
+    /// you reach for daily still climbs the palette.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub folder_usage: std::collections::BTreeMap<String, u64>,
 }
 
 fn default_version() -> u32 {
@@ -84,6 +115,7 @@ impl Default for Library {
             version: FORMAT_VERSION,
             settings: Settings::default(),
             macros: seed_macros(),
+            folder_usage: Default::default(),
         }
     }
 }
@@ -150,6 +182,8 @@ fn m(name: &str, description: &str, tags: &[&str], body: &str) -> Macro {
         description: description.into(),
         tags: tags.iter().map(|s| s.to_string()).collect(),
         body: body.trim().into(),
+        attachments: Vec::new(),
+        folder: None,
         usage_count: 0,
     }
 }

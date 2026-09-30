@@ -1,10 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "./lib/api";
+import { AttachmentMedia, AttachmentTile, ClipIcon } from "./Attachments";
 import { accelerator, isModifierOnly, prettyHotkey } from "./lib/hotkey";
 import { BUILTINS, collectVariables, expandIncludes } from "./lib/template";
 import { useLibrary } from "./lib/useLibrary";
-import { emptyMacro, type Library, type LoginItemState, type Macro } from "./lib/types";
+import {
+  emptyMacro,
+  formatBytes,
+  type GrabTools,
+  type HotkeySlot,
+  type Imported,
+  type Library,
+  type LoginItemState,
+  type Macro,
+} from "./lib/types";
 import "./editor.css";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -17,6 +29,10 @@ export default function Editor() {
   const [showSettings, setShowSettings] = useState(false);
   const [trusted, setTrusted] = useState(true);
   const [armedDelete, setArmedDelete] = useState<string | null>(null);
+  // True while files are hovering over the window, so the drop target can show
+  // itself. Tauri handles the drag natively, so there is no HTML drag event.
+  const [dropping, setDropping] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const saveTimer = useRef<number | null>(null);
   const armTimer = useRef<number | null>(null);
@@ -77,10 +93,39 @@ export default function Editor() {
     setSelectedId(fresh.id);
   }, [library, update]);
 
+  /**
+   * Copy a macro into one you own.
+   *
+   * For a folder macro this is the way to make it yours: its files are copied
+   * into the asset library so the copy no longer depends on the folder, and the
+   * `folder` mark is dropped so it stops being regenerated and starts being
+   * saved. That makes "Duplicate" the answer to "I want to add text to this one".
+   */
   const duplicateMacro = useCallback(
-    (m: Macro) => {
+    async (m: Macro) => {
       if (!library) return;
-      const copy = { ...m, id: crypto.randomUUID(), name: `${m.name} copy`, usageCount: 0 };
+      let attachments = m.attachments;
+      if (m.folder) {
+        const paths = m.attachments.map((a) => a.path).filter((p): p is string => Boolean(p));
+        const imported = await api.importFiles(paths).catch((e) => {
+          setNotice(String(e));
+          return null;
+        });
+        if (!imported) return;
+        if (imported.errors.length > 0) setNotice(imported.errors.join(" · "));
+        attachments = imported.attachments;
+      }
+      const copy: Macro = {
+        ...m,
+        id: crypto.randomUUID(),
+        name: m.folder ? m.name : `${m.name} copy`,
+        // The path it came from is the folder macro's description; a copy of it
+        // would be describing somewhere the copy no longer depends on.
+        description: m.folder ? "" : m.description,
+        attachments,
+        folder: undefined,
+        usageCount: 0,
+      };
       update({ ...library, macros: [copy, ...library.macros] });
       setSelectedId(copy.id);
     },
@@ -106,6 +151,122 @@ export default function Editor() {
     },
     [library, update, armedDelete],
   );
+
+  // ------------------------------------------------------------ attachments
+
+  /**
+   * Add imported files to the selected macro.
+   *
+   * With nothing selected, the drop makes a macro instead of being refused —
+   * dragging a screenshot onto an empty editor should produce something, and
+   * the file's own name is the obvious trigger to give it.
+   */
+  const attach = useCallback(
+    (imported: Imported) => {
+      if (!library) return;
+      setNotice(imported.errors.length > 0 ? imported.errors.join(" · ") : null);
+      if (imported.attachments.length === 0) {
+        if (imported.errors.length === 0) setNotice("Nothing there to attach.");
+        return;
+      }
+
+      const target = library.macros.find((m) => m.id === selectedId);
+      if (target) {
+        update({
+          ...library,
+          macros: library.macros.map((m) =>
+            m.id === target.id
+              ? { ...m, attachments: [...m.attachments, ...imported.attachments] }
+              : m,
+          ),
+        });
+        return;
+      }
+
+      const first = imported.attachments[0].name;
+      const fresh = {
+        ...emptyMacro(),
+        name: (first.includes(".") ? first.slice(0, first.lastIndexOf(".")) : first) || "untitled",
+        attachments: imported.attachments,
+      };
+      update({ ...library, macros: [fresh, ...library.macros] });
+      setSelectedId(fresh.id);
+    },
+    [library, selectedId, update],
+  );
+
+  // The drop and paste listeners are registered once and must not be torn down
+  // and rebuilt on every keystroke in the body field, so they reach the current
+  // `attach` through a ref rather than closing over it.
+  const attachRef = useRef(attach);
+  useEffect(() => {
+    attachRef.current = attach;
+  }, [attach]);
+
+  const addFiles = useCallback(async () => {
+    const picked = await open({ multiple: true, title: "Attach to macro" }).catch((e) => {
+      setNotice(String(e));
+      return null;
+    });
+    if (!picked) return;
+    const paths = Array.isArray(picked) ? picked : [picked];
+    attachRef.current(await api.importFiles(paths));
+  }, []);
+
+  const pasteFiles = useCallback(async () => {
+    attachRef.current(await api.importClipboard());
+  }, []);
+
+  const detach = useCallback(
+    (macro: Macro, attachmentId: string) =>
+      patchMacro(macro.id, {
+        // The file itself is left on disk; the sweep after this save collects it.
+        attachments: macro.attachments.filter((a) => a.id !== attachmentId),
+      }),
+    [patchMacro],
+  );
+
+  /**
+   * Files dropped on the window.
+   *
+   * Tauri intercepts the drag natively, so the webview never sees an HTML drop
+   * event — this is the only way to know it happened.
+   */
+  useEffect(() => {
+    const un = getCurrentWebview().onDragDropEvent(({ payload }) => {
+      if (payload.type === "enter" || payload.type === "over") {
+        setDropping(true);
+      } else if (payload.type === "leave") {
+        setDropping(false);
+      } else {
+        setDropping(false);
+        api
+          .importFiles(payload.paths)
+          .then((r) => attachRef.current(r))
+          .catch((e) => setNotice(String(e)));
+      }
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
+  /**
+   * ⌘V with files on the clipboard.
+   *
+   * The event only tells us files are *there*; the bytes come from reading the
+   * real pasteboard natively, which sees a Finder-copied file the webview would
+   * hand over as nothing. Pasting text is left entirely alone.
+   */
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      if (!e.clipboardData?.types.includes("Files")) return;
+      e.preventDefault();
+      pasteFiles().catch((err) => setNotice(String(err)));
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [pasteFiles]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -134,6 +295,11 @@ export default function Editor() {
       [m.name, m.description, ...m.tags].join(" ").toLowerCase().includes(q),
     );
   }, [macros, filter]);
+
+  // Listed apart because they are a different kind of thing, and because a
+  // folder of two thousand images would otherwise bury the ten you wrote.
+  const yours = useMemo(() => visible.filter((m) => !m.folder), [visible]);
+  const fromFolders = useMemo(() => visible.filter((m) => m.folder), [visible]);
 
   const analysis = useMemo(() => {
     if (!selected) return null;
@@ -184,6 +350,16 @@ export default function Editor() {
         </div>
       )}
 
+      {notice && (
+        <div className="e-banner">
+          <div>{notice}</div>
+          <div className="e-banner-actions">
+            <button onClick={() => setNotice(null)}>Dismiss</button>
+          </div>
+        </div>
+      )}
+
+
       {showSettings ? (
         <SettingsPane library={library} update={update} />
       ) : (
@@ -201,24 +377,32 @@ export default function Editor() {
               </button>
             </div>
             <ul>
-              {visible.map((m) => (
-                <li
+              {yours.map((m) => (
+                <MacroRow
                   key={m.id}
-                  data-selected={m.id === selectedId}
-                  onClick={() => setSelectedId(m.id)}
-                >
-                  <span className="e-item-name">{m.name || "untitled"}</span>
-                  <span className="e-item-meta">
-                    {m.tags.map((t) => `#${t}`).join(" ")}
-                    {m.usageCount > 0 && <em> · {m.usageCount}×</em>}
-                  </span>
-                </li>
+                  macro={m}
+                  selected={m.id === selectedId}
+                  onSelect={() => setSelectedId(m.id)}
+                />
+              ))}
+              {fromFolders.length > 0 && (
+                <li className="e-item-head">From folders · {fromFolders.length}</li>
+              )}
+              {fromFolders.map((m) => (
+                <MacroRow
+                  key={m.id}
+                  macro={m}
+                  selected={m.id === selectedId}
+                  onSelect={() => setSelectedId(m.id)}
+                />
               ))}
               {visible.length === 0 && <li className="e-item-empty">No macros</li>}
             </ul>
           </aside>
 
-          {selected ? (
+          {selected?.folder ? (
+            <FolderDetail macro={selected} onAdopt={() => duplicateMacro(selected)} />
+          ) : selected ? (
             <section className="e-detail">
               <div className="e-fields">
                 <label className="e-field">
@@ -263,6 +447,35 @@ export default function Editor() {
                 placeholder={"Fully analyze {{target}}…\n\nUse {{> another macro}} to include one."}
                 spellCheck={false}
               />
+
+              <div className="e-attachments">
+                <div className="e-attachments-head">
+                  <span>
+                    Attachments
+                    {selected.attachments.length > 0 && (
+                      <em> · {selected.attachments.length}</em>
+                    )}
+                  </span>
+                  <button onClick={addFiles}>Add file…</button>
+                  <button onClick={() => pasteFiles()}>Paste</button>
+                </div>
+                {selected.attachments.length > 0 ? (
+                  <div className="e-tiles">
+                    {selected.attachments.map((a) => (
+                      <AttachmentTile
+                        key={a.id}
+                        attachment={a}
+                        onRemove={() => detach(selected, a.id)}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <p className="e-attachments-empty">
+                    Drop an image or video anywhere in this window, or press ⌘V with one
+                    copied. They are pasted after the text when the macro runs.
+                  </p>
+                )}
+              </div>
 
               <div className="e-inspector">
                 <div className="e-chips">
@@ -310,7 +523,94 @@ export default function Editor() {
           )}
         </div>
       )}
+
+      {dropping && (
+        <div className="e-drop">
+          <div className="e-drop-card">Drop to attach</div>
+        </div>
+      )}
     </div>
+  );
+}
+
+/** One macro in the sidebar. Folder macros are marked, not hidden. */
+function MacroRow({
+  macro,
+  selected,
+  onSelect,
+}: {
+  macro: Macro;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <li data-selected={selected} onClick={onSelect}>
+      <span className="e-item-name">
+        {macro.attachments.length > 0 && (
+          <span className="e-item-clip">
+            <ClipIcon />
+          </span>
+        )}
+        {macro.name || "untitled"}
+      </span>
+      <span className="e-item-meta">
+        {macro.tags.map((t) => `#${t}`).join(" ")}
+        {macro.usageCount > 0 && <em> · {macro.usageCount}×</em>}
+      </span>
+    </li>
+  );
+}
+
+/**
+ * A macro that came from a watched folder.
+ *
+ * Deliberately not the editing pane: the folder is what this macro is made of,
+ * so every field here would be overwritten by the next scan. Showing the real
+ * fields greyed out would be a lie about what is possible — this says what the
+ * macro is, where it came from, and the two things you can actually do.
+ */
+function FolderDetail({ macro, onAdopt }: { macro: Macro; onAdopt: () => void }) {
+  const file = macro.attachments[0];
+  return (
+    <section className="e-detail e-detail--folder">
+      <div className="e-folder-head">
+        <h2>{macro.name}</h2>
+        <p>
+          From <code>{macro.folder}</code>
+        </p>
+        <p className="e-note">
+          Made from the file, so it changes when the file does. Rename the file to rename the
+          trigger; move it out of the folder to remove the macro.
+        </p>
+      </div>
+
+      {file && (
+        <div className="e-folder-preview">
+          <AttachmentMedia attachment={file} playable />
+        </div>
+      )}
+
+      <div className="e-folder-facts">
+        <span>
+          <em>Path</em> {macro.description}
+        </span>
+        {macro.tags.length > 0 && (
+          <span>
+            <em>Tags</em> {macro.tags.map((t) => `#${t}`).join(" ")}
+          </span>
+        )}
+        {file && (
+          <span>
+            <em>File</em> {formatBytes(file.bytes)} · {file.mime}
+          </span>
+        )}
+      </div>
+
+      <div className="e-actions">
+        {file?.path && <button onClick={() => api.revealPath(file.path!)}>Reveal in Finder</button>}
+        <button onClick={onAdopt}>Make an editable copy</button>
+      </div>
+    </section>
   );
 }
 
@@ -321,7 +621,7 @@ function SettingsPane({
   library: Library;
   update: (next: Library) => void;
 }) {
-  const [recording, setRecording] = useState<"hotkey" | "expandHotkey" | null>(null);
+  const [recording, setRecording] = useState<HotkeySlot | null>(null);
   const [path, setPath] = useState("");
   const [hotkeyError, setHotkeyError] = useState<string | null>(null);
 
@@ -357,7 +657,7 @@ function SettingsPane({
 
   const s = library.settings;
 
-  const recorder = (slot: "hotkey" | "expandHotkey") => (
+  const recorder = (slot: HotkeySlot) => (
     <div className="e-row">
       <button
         className="e-hotkey"
@@ -416,6 +716,10 @@ function SettingsPane({
         </label>
         <p className="e-note">Takes effect next time Reze starts.</p>
       </section>
+
+      <FoldersSection library={library} />
+
+      <GrabSection />
 
       <section>
         <h2>Delivery</h2>
@@ -485,6 +789,137 @@ function SettingsPane({
   );
 }
 
+
+/**
+ * Watched folders.
+ *
+ * Saved through their own command rather than the debounced library write: the
+ * backend has to re-point the file watcher and rescan, and doing that on a
+ * timer after a click would leave the list looking applied before it was.
+ */
+function FoldersSection({ library }: { library: Library }) {
+  const [error, setError] = useState<string | null>(null);
+  const folders = library.settings.folders;
+
+  const apply = (next: string[]) =>
+    api.setFolders(next).catch((e) => setError(String(e)));
+
+  const add = async () => {
+    setError(null);
+    const picked = await open({ directory: true, multiple: false, title: "Watch folder" }).catch(
+      (e) => {
+        setError(String(e));
+        return null;
+      },
+    );
+    if (typeof picked !== "string" || folders.includes(picked)) return;
+    apply([...folders, picked]);
+  };
+
+  return (
+    <section>
+      <h2>Folders</h2>
+      <p>
+        Every file in these becomes a macro on its own, named after the file, with its
+        subfolders as tags. Add a file and it appears; delete one and it goes. They are read
+        where they lie — nothing is copied.
+      </p>
+
+      <ul className="e-folders">
+        {folders.map((folder, i) => (
+          <li key={folder}>
+            <code>{folder}</code>
+            {i === 0 && <span className="e-badge">grabs land here</span>}
+            <button onClick={() => api.revealPath(folder)}>Reveal</button>
+            <button onClick={() => apply(folders.filter((f) => f !== folder))}>Remove</button>
+          </li>
+        ))}
+        {folders.length === 0 && (
+          <li className="e-folders-empty">
+            No folders watched. Grabbing needs one to save into.
+          </li>
+        )}
+      </ul>
+
+      <div className="e-row">
+        <button onClick={add}>Add folder…</button>
+      </div>
+      {error && <p className="e-warn">{error}</p>}
+      <p className="e-note">
+        Macros from a folder cannot be edited here — the folder is what they are made of, so
+        rename or delete the file instead.
+      </p>
+    </section>
+  );
+}
+
+/**
+ * Grabbing a link.
+ *
+ * The tools are looked up rather than bundled, so this section's real job is to
+ * say plainly which of them are missing and what to type to get them.
+ */
+function GrabSection() {
+  const [tools, setTools] = useState<GrabTools | null>(null);
+
+  useEffect(() => {
+    // Re-checked when the window comes forward, so installing a tool and
+    // switching back shows it without a restart.
+    const check = () => api.grabTools().then(setTools).catch(() => {});
+    check();
+    window.addEventListener("focus", check);
+    return () => window.removeEventListener("focus", check);
+  }, []);
+
+  const missing = tools
+    ? [
+        !tools.ytDlp && "yt-dlp",
+        !tools.galleryDl && "gallery-dl",
+        !tools.ffmpeg && "ffmpeg",
+      ].filter(Boolean)
+    : [];
+
+  return (
+    <section>
+      <h2>Downloading a link</h2>
+      <p>
+        Paste the URL of a post — YouTube, X, Instagram, Reddit, TikTok, or a link straight to
+        an image — into the palette instead of a search. Reze recognises it, downloads whatever
+        the post is made of into the first folder above, and asks what to call it. It is a
+        macro the moment you press return.
+      </p>
+
+      {tools && (
+        <ul className="e-tools">
+          <ToolRow name="yt-dlp" at={tools.ytDlp} does="video, and most sites" />
+          <ToolRow name="gallery-dl" at={tools.galleryDl} does="images" />
+          <ToolRow name="ffmpeg" at={tools.ffmpeg} does="video above 720p" />
+        </ul>
+      )}
+      {missing.length > 0 && (
+        <p className="e-warn">
+          Missing {missing.join(", ")} — install with{" "}
+          <code>brew install {missing.join(" ")}</code>
+        </p>
+      )}
+      <p className="e-note">
+        Only public posts. Nothing here logs in or works around access control, so anything you
+        could not open in a browser cannot be grabbed either.
+      </p>
+    </section>
+  );
+}
+
+function ToolRow({ name, at, does }: { name: string; at: string | null; does: string }) {
+  return (
+    <li data-found={at ? "true" : "false"}>
+      <span className="e-tool-dot" aria-hidden />
+      <code>{name}</code>
+      <em>{does}</em>
+      <span className="e-tool-at">{at ?? "not installed"}</span>
+    </li>
+  );
+}
 
 /**
  * Launch at login.

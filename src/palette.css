@@ -260,6 +260,188 @@
   font-size: 11px;
 }
 
+/* ---------------------------------------------------------------- media */
+
+.p-clip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 6px;
+  color: var(--fg-dim);
+}
+
+.p-media {
+  display: flex;
+  gap: 10px;
+  /* One band, scrolled sideways — wrapping would push the body off the pane. */
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+/* Only ruled off from the body when there is a body to rule it off from. */
+.p-media + pre {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+/* Slightly tighter than the editor's: the pane is half the width and has to
+   leave room for the body underneath. */
+.p-media .a-tile {
+  width: 96px;
+}
+
+.p-media .a-frame {
+  height: 66px;
+}
+
+/* ------------------------------------------------------------ download */
+
+/* Not a list, so it does not take the split-pane layout — there is exactly one
+   thing to do here, and the panel says what it is. */
+.p-grab {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px 18px;
+}
+
+.p-grab-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.p-grab-title {
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.p-grab-url {
+  font: 11.5px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Indeterminate: yt-dlp reports progress, but only after it has worked out the
+   formats, and a bar that sat at zero and then jumped would say less than one
+   that simply says "still going". */
+.p-grab-bar {
+  height: 2px;
+  border-radius: 2px;
+  background: var(--sel);
+  overflow: hidden;
+}
+
+.p-grab-bar span {
+  display: block;
+  width: 38%;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  animation: p-grab-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes p-grab-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(365%);
+  }
+}
+
+/* Some people turn animation off system-wide, and an infinite loop is exactly
+   what that setting is about. A static bar still reads as "in progress". */
+@media (prefers-reduced-motion: reduce) {
+  .p-grab-bar span {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+
+.p-grab-warn {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--fg-dim);
+}
+
+.p-grab-warn code {
+  font-size: 11px;
+  padding: 1px 5px;
+  margin: 0 2px;
+  border-radius: 4px;
+  background: var(--sel);
+}
+
+/* ------------------------------------------------------------- naming */
+
+.p-body--naming {
+  height: 240px;
+}
+
+.p-name-fields {
+  width: 42%;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 12px;
+  border-right: 1px solid var(--line);
+}
+
+.p-name-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.p-name-fields span {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-faint);
+}
+
+.p-name-fields input {
+  background: var(--sel);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 7px 9px;
+  color: var(--fg);
+  font-size: 13.5px;
+  outline: none;
+}
+
+.p-name-fields input:focus {
+  border-color: var(--accent);
+}
+
+.p-name-note {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-faint);
+}
+
+.p-name-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+.p-name-preview .a-media,
+.p-name-preview .a-video-still {
+  max-height: 200px;
+  border-radius: 6px;
+}
+
 /* ------------------------------------------------- non-macOS fallback */
 
 /* No NSVisualEffectView outside macOS, so paint the surface ourselves. The

@@ -4,7 +4,7 @@
 
 # Reze
 
-**A menu-bar app that turns short triggers into full prompts.**
+**A menu-bar app that turns short triggers into full prompts — and the images and video that go with them.**
 
 </div>
 
@@ -134,15 +134,195 @@ global shortcut swallows that key in *every* application.
 | `⌘↵` | Put the expansion on the clipboard instead of pasting |
 | `esc` | Back out of fill-in, or close |
 
+Paste a **link** into the search field instead of a search and it turns into a
+download. See [Pasting a link](#pasting-a-link).
+
 The tray icon opens the macro editor, where you can add, edit, tag, duplicate
-and delete macros, rebind the hotkeys, change how expansions are delivered, and
-set Reze to start at login.
+and delete macros, [attach files](#attachments) to them, rebind the hotkeys,
+change how expansions are delivered, and set Reze to start at login.
 
 ### Quitting
 
 Use **Quit Reze** in the tray menu, or `⌘Q` with the editor focused. A menu-bar
 app has no application menu, so `⌘Q` has nothing to hang off by default — the
 editor window handles it itself. `⌘W` there closes the window without quitting.
+
+## Attachments
+
+A macro can carry files as well as text — a screenshot, a reference video, a
+PDF, anything. Trigger it and they arrive in whatever app you were in, the same
+way the text does.
+
+Three ways to attach one, in the editor:
+
+- **Drop it** anywhere on the window.
+- **`⌘V`** with a file or an image copied. Reze reads the real pasteboard rather
+  than what the web view saw, so a file copied in Finder works as well as a
+  screenshot taken with `⌘⇧4`.
+- **Add file…** for the ordinary file picker.
+
+Dropping onto an empty editor with nothing selected makes a new macro named
+after the file, rather than refusing the drop.
+
+### How they are delivered
+
+A clipboard holds one payload, so a macro carrying both takes two passes:
+**the text first, then the files.** That leaves the text landing exactly where a
+text-only macro would put it — surrounding characters and all — and the
+attachments follow. In a chat composer they drop into the attachment tray; in a
+document they land after the paragraph.
+
+`⌘↵` copies instead of pasting, and can only copy one thing: the text if there
+is any, otherwise the files.
+
+Images go on the clipboard as the file *and* as the picture, so an app that
+inlines images gets one without reading the file, and an app that wants a file
+gets a real one. Everything else goes as a file.
+
+This part is macOS-only — there is no portable notion of "the clipboard holds
+these three files", and the X11 answer is a different protocol again. Elsewhere
+the text is still delivered and the attachments are reported as skipped.
+
+### Where they live
+
+Alongside the library, in `~/.reze/assets/`, under a generated name that
+`macros.json` refers to:
+
+```jsonc
+"attachments": [
+  {
+    "id": "…",
+    "file": "a1b2c3d4-….png",   // the name inside ~/.reze/assets
+    "name": "Screenshot.png",   // what it was called when it came in
+    "kind": "image",            // image | video | audio | file
+    "mime": "image/png",
+    "bytes": 261314
+  }
+]
+```
+
+Files are **copied in**, not linked, so a macro keeps working after the
+screenshot it was made from is thrown away and the whole `~/.reze` directory
+stays portable between machines.
+
+Files no macro refers to any more are deleted after a save in the app — never
+after an edit you make to `macros.json` yourself, because a text editor
+mid-write can momentarily look like a library with no macros in it, and
+sweeping on that would take every attachment with it. Anything imported in the
+last minute is spared regardless, since a dropped file exists for a moment
+before the macro that references it is written.
+
+### Watched folders
+
+Attaching files one at a time is fine for a handful. For a collection, point
+Reze at the folder instead:
+
+**Settings → Folders → Add folder…**
+
+Every file in it becomes a macro on its own, named after the file, with its
+subfolders as tags. Add a file and the macro appears; delete it and the macro
+goes; rename it and the trigger changes. A folder like
+
+```
+~/refs/
+├── memes/
+│   └── cats/
+│       └── tabby.png     →  trigger "tabby",  tags #memes #cats
+└── logo.svg              →  trigger "logo"
+```
+
+is a library of two macros without a word typed into the editor.
+
+These are **derived**, not authored, so:
+
+- They are never written into `macros.json`. The folder is what they are made
+  of, the way that file is for the ones you wrote.
+- Their files are read where they lie — nothing is copied, because that folder
+  is already yours and shadowing a hundred gigabytes of video inside `~/.reze`
+  would be absurd.
+- The editor shows them read-only. To make one yours — to add text around it,
+  say — press **Make an editable copy**, which copies its file into the asset
+  library and hands you an ordinary macro.
+- Where a trigger name is claimed twice, the one you wrote wins.
+
+Dotfiles are skipped, subfolders are followed eight deep, and the scan stops at
+two thousand files so that pointing this at a home directory degrades rather
+than hangs.
+
+## Pasting a link
+
+Open the palette and paste the URL of a post where you would type a search.
+Reze recognises that it is a link rather than a query and offers to download it
+instead:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ 🔍  https://www.youtube.com/watch?v=…                        │
+├──────────────────────────────────────────────────────────────┤
+│ Download from youtube.com                                    │
+│ https://www.youtube.com/watch?v=…                            │
+└──────────────────────────────────────────────────────────────┘
+  ↵ download
+```
+
+`↵` downloads it into the first watched folder. When it lands, the palette asks
+what to call it, with the name it worked out already filled in and selected —
+so `↵` again accepts it, or type over it first:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ ↓  Downloaded                                                │
+├──────────────────────────┬───────────────────────────────────┤
+│ CALL IT                  │                                   │
+│ ┌──────────────────────┐ │         ▶                         │
+│ │ youtube - jawed - Me…│ │                                   │
+│ └──────────────────────┘ │                                   │
+└──────────────────────────┴───────────────────────────────────┘
+  ↵ save   esc keep this name
+```
+
+The name you give it renames the file, and the file is what the macro is named
+after — so it is a macro called exactly that, immediately.
+
+Names are worked out from the post: the site, who posted it, and the title.
+That is the point — a folder of `video.mp4` and `image.jpg` would be useless a
+week later.
+
+`esc` during a download leaves the naming step, not the download: it finishes
+in the background and keeps the name it was given.
+
+### What it uses
+
+Nothing is bundled. Three tools are looked for, and **Settings → Downloading a
+link** says which are present and what to type for the rest:
+
+| Tool | For | Without it |
+| --- | --- | --- |
+| `yt-dlp` | Video, and the site knowledge for most of the web | No video from any post |
+| `gallery-dl` | Images, which `yt-dlp` deliberately does not do | Image-only posts fail |
+| `ffmpeg` | Joining the separate streams YouTube serves | Video capped around 720p |
+
+```bash
+brew install yt-dlp gallery-dl ffmpeg
+```
+
+They are searched for on `PATH` and in the usual Homebrew and MacPorts
+locations, because an app launched from Finder inherits a `PATH` from `launchd`
+that has none of them in it.
+
+A link straight to a file — `…/photo.png` — skips all three and is fetched with
+`curl`, so that much works with nothing installed.
+
+Video is asked for as **H.264 in mp4** where the site offers it. Asking for the
+container alone is not enough: AV1 is also mp4, and macOS plays almost none of
+it — not in Messages, not in Keynote, not in this app's own preview.
+
+### What it will not do
+
+Only public posts. Nothing here logs in, supplies credentials, or works around
+access control — anything you could not open in a browser cannot be grabbed
+either. It is a faster way to save what you can already see, and respecting
+whatever the site's terms allow you to save is on you.
 
 ## Template syntax
 
@@ -172,6 +352,7 @@ the change on next read. Diff it, commit it, sync it however you like.
   "settings": {
     "hotkey": "CmdOrCtrl+Shift+Space",
     "expandHotkey": "Alt+Space", // expand the trigger at the caret
+    "folders": ["~/.reze/media"],// every file in these becomes a macro
     "trackTyping": true,         // needed for expansion inside terminals
     "pasteMode": "paste",        // or "copy" to never paste directly
     "restoreClipboard": true
@@ -183,6 +364,7 @@ the change on next read. Diff it, commit it, sync it however you like.
       "description": "Deep end-to-end read of a codebase",
       "tags": ["review"],
       "body": "{{> rigor}}\n\nFully and thoroughly analyze {{target|this codebase}}…",
+      "attachments": [], // see Attachments
       "usageCount": 0
     }
   ]
@@ -242,6 +424,10 @@ bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/b
 - `assets/icon.svg`, `assets/tray.svg` — icon sources (see below)
 - `src-tauri/src/store.rs` — the JSON library, its schema, and the seed macros
 - `src-tauri/src/paste.rs` — clipboard + synthesized keystrokes, and the permission check
+- `src-tauri/src/assets.rs` — the attachment library on disk (`cargo test`)
+- `src-tauri/src/clip.rs` — the pasteboard, for everything that is not text
+- `src-tauri/src/folders.rs` — watched folders becoming macros (`cargo test`)
+- `src-tauri/src/grab.rs` — a URL becoming a file (`cargo test`)
 - `src-tauri/src/expand.rs` — which trigger the typed words name (`cargo test`)
 - `src-tauri/src/typed.rs` — the keystroke tap behind terminal support
 - `src-tauri/src/focus.rs` — remembering who had focus, and pasteboard change detection
@@ -249,6 +435,7 @@ bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/b
 - `src-tauri/src/lib.rs` — windows, tray, global hotkeys, file watcher, IPC commands
 - `src/lib/template.ts` — the template language (variables, includes, built-ins)
 - `src/lib/fuzzy.ts` — the palette's ranking
+- `src/Attachments.tsx` — attachment previews, shared by both windows
 - `src/Palette.tsx`, `src/Editor.tsx` — the two windows, routed by window label
 
 Both windows load the same bundle; `main.tsx` picks a component from
