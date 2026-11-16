@@ -1311,6 +1311,14 @@ fn take_hand_edit() -> Option<Result<Library, String>> {
     // we last wrote, which is the library as it was before the edit — unless
     // that was not a library either, and then there is nothing to go by.
     if let Ok(before) = serde_json::from_str::<Library>(&ours) {
+        // Sync switched on in the file is the same step as switching it on in
+        // Settings, and is taken as carefully: see `save_library`. The macros
+        // are still as they were — nothing has been fetched yet.
+        if edited.settings.syncs() && !before.settings.syncs() {
+            if let Err(e) = store::backup() {
+                eprintln!("reze: could not set the library aside before syncing: {e}");
+            }
+        }
         let dates = |l: &Library| {
             let macros: Vec<u64> = l.macros.iter().map(|m| m.updated_at).collect();
             (macros, l.deleted.clone())
