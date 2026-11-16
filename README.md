@@ -501,7 +501,8 @@ the change on next read. Diff it, commit it, sync it however you like.
     "restoreClipboard": true,
     "clipboardHotkey": "CmdOrCtrl+Shift+V",
     "clipboardHistory": true,    // remember what you copy
-    "clipboardLimit": 200
+    "clipboardLimit": 200,
+    "shareOverTailscale": true   // let your other machines import this
   },
   "macros": [
     {
@@ -525,6 +526,76 @@ Two settings are deliberately not in here: the Accessibility grant and the
 launch-at-login switch. Both are owned by macOS, and a copy of the answer in
 this file would start lying the moment you changed it in System Settings — so
 Reze reads them back from the OS instead of remembering them.
+
+## Other devices
+
+With [Tailscale](https://tailscale.com) running, Reze can copy the library from
+another of your machines. **Settings → Other devices** lists them, says which
+have a Reze answering, and imports from any that do:
+
+```
+● Tailscale is connected. This machine is mac-mini            Look again
+┌──────────────────────────────────────────────────────────────────────┐
+│ ● tenet   Linux                 16 macros · 5 attachments   Import… │
+│ ○ midna   Linux                             Reze is not answering   │
+│ ○ laptop  macOS                                           offline   │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Import…** fetches that machine's library and says what would happen before
+anything does:
+
+```
+ 6  new                                     bug report, standup and 4 more
+ 2  different here — tenet's version wins   full analysis, rigor
+ 8  already the same
+ 2  only on this machine                    from clipboard, scratch
+
+ (•) Add and update          keeps the 2 only this machine has
+ ( ) Replace this library    removes them, leaving a copy of tenet's
+ [ ] Bring its settings too
+```
+
+A macro there and a macro here are the same macro if they share an id or,
+failing that, a trigger — every install seeds the same starter macros under ids
+of its own, and two machines' `full analysis` should meet as one. Where both
+have it and they differ, the other machine's version wins; the use count stays
+yours. Attachments come along with the macros that carry them.
+
+What never comes along: watched folders and the macros made from them, which
+are paths on that machine; the clipboard history; and, between a Mac and a
+Linux machine, the hotkeys, which are different on purpose.
+
+The library as it was is set aside in `~/.reze/backups/` first — the last five
+are kept, along with the attachments they name — and **Undo**, which appears
+the moment an import finishes, puts the newest one back.
+
+### What is listening
+
+To be imported *from*, a Reze answers on port 7393 of its machine's Tailscale
+address. Tailscale already encrypts the connection and knows who is on the
+other end of it, so Reze adds no accounts, keys or pairing of its own — and
+keeps what it does to three rules:
+
+- **Only that address.** Not the local network, not the internet: nothing off
+  your tailnet can open a connection at all.
+- **Only your devices.** Each connection is put to `tailscale whois`, and
+  anything not signed in as the same user as this machine — a colleague on a
+  shared tailnet, a node shared in from another one, a tagged server — is
+  refused whatever it asks for.
+- **Only reading.** It hands over `macros.json` and the attachment files that
+  names. No request changes anything; importing is something the other machine
+  does to itself.
+
+**Let my other devices import from this one** switches it off, and then nothing
+listens. It is on by default so that a second machine finds the first without
+a trip back to it.
+
+Both machines need Tailscale signed in as the same user and a Reze new enough
+to have this. If a machine shows as *not answering* and Reze is running there,
+a firewall is the usual reason — with `ufw`, `sudo ufw allow in on tailscale0`.
+It is plain HTTP inside the tunnel, so `curl http://tenet:7393/reze` shows what
+another Reze would see.
 
 ## Typing awareness
 
@@ -603,6 +674,8 @@ bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/b
 - `src-tauri/src/focus.rs` — remembering who had focus, and pasteboard change detection
 - `src-tauri/src/login.rs` — the launch-at-login switch, via `SMAppService` (an XDG autostart entry on Linux)
 - `src-tauri/src/x11.rs` — Linux: focus, app names and icons, terminals (`cargo test`)
+- `src-tauri/src/tailnet.rs` — other machines over Tailscale: finding them, answering them, asking them (`cargo test`)
+- `src-tauri/src/merge.rs` — what importing another library does to this one (`cargo test`)
 - `src-tauri/src/lib.rs` — windows, tray, global hotkeys, file watcher, IPC commands
 - `src/lib/template.ts` — the template language (variables, includes, built-ins)
 - `src/lib/fuzzy.ts` — the palette's ranking

@@ -5,8 +5,11 @@ import type {
   Grabbed,
   GrabTools,
   Imported,
+  ImportOutcome,
+  ImportPreview,
   Library,
   LoginItemState,
+  Tailnet,
 } from "./types";
 
 export const getLibrary = () => invoke<Library>("get_library");
@@ -65,6 +68,30 @@ export const grabUrl = (url: string) => invoke<Grabbed>("grab_url", { url });
 /** Rename a just-grabbed file, which renames the macro made from it. */
 export const renameGrab = (path: string, name: string) =>
   invoke<string>("rename_grab", { path, name });
+
+// ------------------------------------------------------------ other devices
+
+/**
+ * Whether Tailscale is up, and which of your other machines run Reze.
+ *
+ * Slow by the standards of everything else here — it asks each machine and
+ * waits a couple of seconds for the ones that do not answer.
+ */
+export const tailnetStatus = () => invoke<Tailnet>("tailnet_status");
+
+/** What importing from the machine at `address` would do, without doing it. */
+export const importPreview = (address: string) =>
+  invoke<ImportPreview>("import_preview", { address });
+
+/**
+ * Bring that machine's library into this one. `replace` makes this library a
+ * copy of it; otherwise what only this machine has is kept.
+ */
+export const importLibrary = (address: string, replace: boolean, settings: boolean) =>
+  invoke<ImportOutcome>("import_library", { address, replace, settings });
+
+/** Put the library back the way it was before the last import. */
+export const undoImport = () => invoke<void>("undo_import");
 
 // ------------------------------------------------------- clipboard history
 

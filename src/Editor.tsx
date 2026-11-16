@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "./lib/api";
 import { AttachmentMedia, AttachmentTile, ClipIcon } from "./Attachments";
@@ -11,12 +12,16 @@ import { INSTALL, isMac, MOD, REVEAL } from "./lib/platform";
 import {
   emptyMacro,
   formatBytes,
+  type Device,
   type GrabTools,
   type HotkeySlot,
   type Imported,
+  type ImportOutcome,
+  type ImportPreview,
   type Library,
   type LoginItemState,
   type Macro,
+  type Tailnet,
 } from "./lib/types";
 import "./editor.css";
 
@@ -36,6 +41,8 @@ export default function Editor() {
   const [notice, setNotice] = useState<string | null>(null);
 
   const saveTimer = useRef<number | null>(null);
+  // What the pending save is going to write, so it can be written early.
+  const unsaved = useRef<Library | null>(null);
   const armTimer = useRef<number | null>(null);
 
   const macros = library?.macros ?? [];
@@ -57,24 +64,46 @@ export default function Editor() {
     return () => window.removeEventListener("focus", check);
   }, []);
 
+  const write = useCallback(
+    (next: Library) =>
+      api
+        .saveLibrary(next)
+        .then(() => setSaveState("saved"))
+        .catch((e) => {
+          setSaveState("error");
+          setError(String(e));
+        }),
+    [setError],
+  );
+
   /** Apply a change immediately and debounce the write to disk. */
   const update = useCallback(
     (next: Library) => {
       setLibrary(next);
       setSaveState("saving");
+      unsaved.current = next;
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = window.setTimeout(() => {
-        api
-          .saveLibrary(next)
-          .then(() => setSaveState("saved"))
-          .catch((e) => {
-            setSaveState("error");
-            setError(String(e));
-          });
+        unsaved.current = null;
+        write(next);
       }, 400);
     },
-    [setLibrary, setError],
+    [setLibrary, write],
   );
+
+  /**
+   * Write a pending change now instead of when its timer fires.
+   *
+   * For anything that rewrites the library behind the editor's back — an
+   * import, or undoing one. A save still waiting out its debounce would land
+   * afterwards and quietly put back the library from before.
+   */
+  const flush = useCallback(async () => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    const next = unsaved.current;
+    unsaved.current = null;
+    if (next) await write(next);
+  }, [write]);
 
   const patchMacro = useCallback(
     (id: string, patch: Partial<Macro>) => {
@@ -402,7 +431,7 @@ export default function Editor() {
 
 
       {showSettings ? (
-        <SettingsPane library={library} update={update} />
+        <SettingsPane library={library} update={update} flush={flush} />
       ) : (
         <div className="e-main">
           <aside className="e-sidebar">
@@ -658,9 +687,11 @@ function FolderDetail({ macro, onAdopt }: { macro: Macro; onAdopt: () => void })
 function SettingsPane({
   library,
   update,
+  flush,
 }: {
   library: Library;
   update: (next: Library) => void;
+  flush: () => Promise<void>;
 }) {
   const [recording, setRecording] = useState<HotkeySlot | null>(null);
   const [path, setPath] = useState("");
@@ -805,6 +836,8 @@ function SettingsPane({
       </section>
 
       <StartupSection />
+
+      <DevicesSection library={library} update={update} flush={flush} />
 
       <section>
         <h2>Template syntax</h2>
@@ -1165,5 +1198,395 @@ function StartupSection() {
         </>
       )}
     </section>
+  );
+}
+
+/** `macOS`, `linux` and `windows`, the way Tailscale spells them, as names. */
+function osName(os: string): string {
+  const known: Record<string, string> = { macos: "macOS", linux: "Linux", windows: "Windows" };
+  return known[os.toLowerCase()] ?? os;
+}
+
+const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** The first few of a list of triggers, and how many were left out. */
+function some(names: string[], most = 4): string {
+  if (names.length <= most) return names.join(", ");
+  return `${names.slice(0, most).join(", ")} and ${names.length - most} more`;
+}
+
+/** What a machine has to say for itself in the list. */
+function says(device: Device): string {
+  if (!device.online) return "offline";
+  if (!device.reze) return "Reze is not answering";
+  const { macros, attachments } = device.reze;
+  return attachments > 0
+    ? `${count(macros, "macro")} · ${count(attachments, "attachment")}`
+    : count(macros, "macro");
+}
+
+/**
+ * Your other machines, and importing from one.
+ *
+ * Tailscale owns the answer to "which machines are mine", so like the login
+ * item it is read back rather than remembered: on opening, whenever the window
+ * comes forward, and whenever the backend notices the tailnet come or go.
+ *
+ * Importing is never one click. Choosing a machine fetches its library and
+ * says what would happen — which macros are new, which would be overwritten,
+ * which only this machine has — and the import is the button under that.
+ */
+function DevicesSection({
+  library,
+  update,
+  flush,
+}: {
+  library: Library;
+  update: (next: Library) => void;
+  flush: () => Promise<void>;
+}) {
+  // Null until the first answer, for the reason StartupSection starts at null.
+  const [net, setNet] = useState<Tailnet | null>(null);
+  const [looking, setLooking] = useState(false);
+  // The machine whose import is open, and what importing from it would do.
+  const [from, setFrom] = useState<Device | null>(null);
+  const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [replace, setReplace] = useState(false);
+  const [withSettings, setWithSettings] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<ImportOutcome | null>(null);
+  const [undone, setUndone] = useState(false);
+
+  // Each look takes seconds and several can be in flight — a focus, then the
+  // tailnet changing under it. Only the last one asked gets to answer.
+  const asked = useRef(0);
+  const look = useCallback(() => {
+    const mine = ++asked.current;
+    setLooking(true);
+    api
+      .tailnetStatus()
+      .then((next) => mine === asked.current && setNet(next))
+      .catch(() => {})
+      .finally(() => mine === asked.current && setLooking(false));
+  }, []);
+
+  useEffect(() => {
+    look();
+    window.addEventListener("focus", look);
+    const changed = listen("tailnet-changed", look);
+    return () => {
+      window.removeEventListener("focus", look);
+      changed.then((un) => un());
+    };
+  }, [look]);
+
+  // The same guard for previews: clicking a second machine while the first is
+  // still being read must not show the first one's library under its name.
+  const previewing = useRef("");
+  const choose = (device: Device) => {
+    previewing.current = device.address;
+    setFrom(device);
+    setPreview(null);
+    setReplace(false);
+    setWithSettings(false);
+    setError(null);
+    setDone(null);
+    setUndone(false);
+    api
+      .importPreview(device.address)
+      .then((p) => previewing.current === device.address && setPreview(p))
+      .catch((e) => previewing.current === device.address && setError(String(e)));
+  };
+
+  const close = () => {
+    previewing.current = "";
+    setFrom(null);
+    setPreview(null);
+    setError(null);
+  };
+
+  const run = async () => {
+    if (!from) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await flush();
+      setDone(await api.importLibrary(from.address, replace, withSettings));
+      previewing.current = "";
+      setFrom(null);
+      setPreview(null);
+      look(); // its counts, and this machine's, may both have just changed
+    } catch (e) {
+      setError(String(e));
+    }
+    setBusy(false);
+  };
+
+  const undo = async () => {
+    setError(null);
+    try {
+      await flush();
+      await api.undoImport();
+      setDone(null);
+      setUndone(true);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const s = library.settings;
+  const running = net?.state === "running" ? net : null;
+
+  // With nothing only here, the two ways of importing come to the same macros.
+  const choice = preview !== null && preview.onlyHere.length > 0;
+  const idle =
+    preview !== null &&
+    preview.added.length === 0 &&
+    preview.changed.length === 0 &&
+    !(replace && choice) &&
+    !withSettings;
+
+  const did = done
+    ? [
+        done.added > 0 && `${done.added} added`,
+        done.updated > 0 && `${done.updated} updated`,
+        done.removed > 0 && `${done.removed} removed`,
+        done.attachments > 0 && `${count(done.attachments, "file")} fetched`,
+      ].filter(Boolean)
+    : [];
+
+  return (
+    <section>
+      <h2>Other devices</h2>
+      <p>
+        Copy the library from another of your machines — its macros, their attachments and, if
+        you want them, its settings. It travels over Tailscale, between machines signed in as
+        you, with Reze running on both.
+      </p>
+
+      {net === null ? (
+        <p className="e-note">Looking for Tailscale…</p>
+      ) : net.state === "missing" ? (
+        <p className="e-note">
+          Tailscale is not installed on this machine. Install it here and on the other one, sign
+          in to both as the same user, and your machines appear here.
+        </p>
+      ) : net.state === "stopped" ? (
+        <p className="e-note">
+          Tailscale is installed but not connected. Connect it and your other machines appear
+          here.
+        </p>
+      ) : (
+        <>
+          <div className="e-row e-tailnet">
+            <span className="e-device-dot" data-on="true" aria-hidden />
+            <span>
+              Tailscale is connected. This machine is <code>{net.name}</code>
+            </span>
+            <button onClick={look} disabled={looking}>
+              {looking ? "Looking…" : "Look again"}
+            </button>
+          </div>
+
+          <ul className="e-devices">
+            {net.devices.map((device) => (
+              <li key={device.address} data-reze={device.reze ? "true" : "false"}>
+                <div className="e-device">
+                  <span className="e-device-dot" data-on={device.reze ? "true" : "false"} aria-hidden />
+                  <code>{device.name}</code>
+                  <em>{osName(device.os)}</em>
+                  <span className="e-device-says">{says(device)}</span>
+                  {device.reze && from?.address !== device.address && (
+                    <button onClick={() => choose(device)} disabled={busy}>
+                      Import…
+                    </button>
+                  )}
+                </div>
+
+                {from?.address === device.address && (
+                  <div className="e-import">
+                    {preview === null ? (
+                      !error && <p className="e-note">Reading {device.name}’s library…</p>
+                    ) : (
+                      <>
+                        <ul className="e-import-facts">
+                          <Fact n={preview.added.length} names={preview.added}>
+                            new
+                          </Fact>
+                          <Fact n={preview.changed.length} names={preview.changed}>
+                            different here — {device.name}’s version wins
+                          </Fact>
+                          <Fact n={preview.same}>already the same</Fact>
+                          <Fact n={preview.onlyHere.length} names={preview.onlyHere}>
+                            only on this machine
+                          </Fact>
+                        </ul>
+
+                        {choice && (
+                          <>
+                            <label className="e-check">
+                              <input
+                                type="radio"
+                                checked={!replace}
+                                onChange={() => setReplace(false)}
+                              />
+                              <span>
+                                Add and update
+                                <em>
+                                  Keeps the {count(preview.onlyHere.length, "macro")} only this
+                                  machine has.
+                                </em>
+                              </span>
+                            </label>
+                            <label className="e-check">
+                              <input
+                                type="radio"
+                                checked={replace}
+                                onChange={() => setReplace(true)}
+                              />
+                              <span>
+                                Replace this library
+                                <em>
+                                  Removes the {count(preview.onlyHere.length, "macro")} only this
+                                  machine has, leaving a copy of {device.name}’s.
+                                </em>
+                              </span>
+                            </label>
+                          </>
+                        )}
+
+                        <label className="e-check">
+                          <input
+                            type="checkbox"
+                            checked={withSettings}
+                            onChange={(e) => setWithSettings(e.target.checked)}
+                          />
+                          <span>
+                            Bring its settings too
+                            <em>
+                              How expansions are delivered, whether typing is watched, and the
+                              clipboard history’s switch and limit
+                              {preview.hotkeys
+                                ? " — and the three hotkeys."
+                                : ". Not the hotkeys: macOS and Linux have different ones on purpose."}{" "}
+                              Watched folders stay as they are, since they are paths on that
+                              machine.
+                            </em>
+                          </span>
+                        </label>
+
+                        <div className="e-row">
+                          <button
+                            className={replace && choice ? "e-danger" : undefined}
+                            onClick={run}
+                            disabled={busy || idle}
+                          >
+                            {busy
+                              ? "Importing…"
+                              : replace && choice
+                                ? "Replace this library"
+                                : "Import"}
+                          </button>
+                          <button onClick={close} disabled={busy}>
+                            Cancel
+                          </button>
+                          <span>
+                            {idle
+                              ? `Nothing to bring over — everything ${device.name} has is already here.`
+                              : preview.attachments > 0
+                                ? `${count(preview.attachments, "file")} to fetch · ${formatBytes(preview.bytes)}`
+                                : ""}
+                          </span>
+                        </div>
+                      </>
+                    )}
+                    {error && (
+                      <>
+                        <p className="e-warn">{error}</p>
+                        {preview === null && (
+                          <div className="e-row">
+                            <button onClick={close}>Close</button>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+              </li>
+            ))}
+            {net.devices.length === 0 && (
+              <li className="e-devices-empty">
+                No other computers are signed in to this tailnet as you.
+              </li>
+            )}
+          </ul>
+        </>
+      )}
+
+      {done && (
+        <div className="e-row e-imported">
+          <span>
+            Imported from <code>{done.from}</code>
+            {did.length > 0 ? ` — ${did.join(", ")}.` : " — nothing needed changing."}
+          </span>
+          <button onClick={undo}>Undo</button>
+        </div>
+      )}
+      {done && done.missing.length > 0 && (
+        <p className="e-warn">
+          {done.from} no longer has {count(done.missing.length, "attached file")} its library
+          names, so {done.missing.length === 1 ? "it was" : "they were"} left off:{" "}
+          {some(done.missing)}.
+        </p>
+      )}
+      {done?.warnings.map((w) => (
+        <p className="e-warn" key={w}>
+          {w}
+        </p>
+      ))}
+      {undone && <p className="e-note">Put back the way it was before the import.</p>}
+      {!from && error && <p className="e-warn">{error}</p>}
+
+      <label className="e-check" style={{ marginTop: 16 }}>
+        <input
+          type="checkbox"
+          checked={s.shareOverTailscale}
+          onChange={(e) =>
+            update({ ...library, settings: { ...s, shareOverTailscale: e.target.checked } })
+          }
+        />
+        <span>
+          Let my other devices import from this one
+          <em>
+            Reze listens on this machine’s Tailscale address
+            {running ? ` (${running.address}, port ${running.port})` : ""} and nowhere else, and
+            answers only devices signed in to Tailscale as you. It hands over the macros you
+            wrote and their attachments — never the clipboard history, and nothing from watched
+            folders. Off, nothing listens at all.
+          </em>
+        </span>
+      </label>
+      {running?.problem && s.shareOverTailscale && <p className="e-warn">{running.problem}</p>}
+    </section>
+  );
+}
+
+/** One line of what an import would do: how many, what of, and which. */
+function Fact({
+  n,
+  names,
+  children,
+}: {
+  n: number;
+  names?: string[];
+  children: React.ReactNode;
+}) {
+  return (
+    <li data-none={n === 0 ? "true" : "false"}>
+      <strong>{n}</strong>
+      <span>{children}</span>
+      {names && names.length > 0 && <em>{some(names)}</em>}
+    </li>
   );
 }

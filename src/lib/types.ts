@@ -69,6 +69,8 @@ export type Settings = {
   clipboardHistory: boolean;
   /** How many copies to keep. */
   clipboardLimit: number;
+  /** Whether your other machines may fetch this library over Tailscale. */
+  shareOverTailscale: boolean;
 };
 
 export type Library = {
@@ -181,6 +183,79 @@ export function clipWhen(at: number): string {
   if (wasYesterday) return `Yesterday ${time}`;
   return `${then.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
 }
+
+/** What another machine's Reze says about itself when asked if it is there. */
+export type Hello = {
+  protocol: number;
+  /** `macos` or `linux`. */
+  os: string;
+  macros: number;
+  attachments: number;
+};
+
+/** One of your other machines on the tailnet. */
+export type Device = {
+  /** Its tailnet name — the first label of its MagicDNS name. */
+  name: string;
+  /** Its Tailscale address, which is also how the backend is told which one. */
+  address: string;
+  /** As Tailscale reports it: `macOS`, `linux`, `windows`. */
+  os: string;
+  online: boolean;
+  /** What answered there, or `null` if no Reze did. */
+  reze: Hello | null;
+};
+
+/**
+ * Whether there is a tailnet, and who else is on it.
+ *
+ * Read back from Tailscale every time rather than remembered, for the reason
+ * the login item is: it is switched on and off somewhere else entirely.
+ */
+export type Tailnet =
+  | { state: "missing" }
+  | { state: "stopped" }
+  | {
+      state: "running";
+      name: string;
+      address: string;
+      port: number;
+      /** Whether this machine is answering your other ones right now. */
+      listening: boolean;
+      /** Why not, if it should be and could not. */
+      problem: string | null;
+      devices: Device[];
+    };
+
+/**
+ * What importing from a machine would do, before it is done.
+ *
+ * Names wherever something would change, so that what is being agreed to can
+ * be read rather than counted.
+ */
+export type ImportPreview = {
+  added: string[];
+  changed: string[];
+  same: number;
+  onlyHere: string[];
+  /** Attachment files that would have to be fetched, and their total size. */
+  attachments: number;
+  bytes: number;
+  /** Whether the hotkeys can come along — only between two of the same OS. */
+  hotkeys: boolean;
+};
+
+/** What an import did. */
+export type ImportOutcome = {
+  from: string;
+  added: number;
+  updated: number;
+  removed: number;
+  attachments: number;
+  /** Attachments that machine's library names but no longer has. */
+  missing: string[];
+  warnings: string[];
+};
 
 /** What an import produced, and why anything else was skipped. */
 export type Imported = {

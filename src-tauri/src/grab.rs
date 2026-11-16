@@ -66,7 +66,9 @@ pub fn tools() -> Tools {
     }
 }
 
-fn which(name: &str) -> Option<String> {
+/// Find a tool by name. Also how [`crate::tailnet`] finds the Tailscale CLI,
+/// which is hidden from a launched app for exactly the same reason.
+pub fn which(name: &str) -> Option<String> {
     // `PATH` first, so a version the user put ahead of Homebrew's still wins.
     if let Some(path) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path) {
