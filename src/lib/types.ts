@@ -39,6 +39,8 @@ export type Macro = {
    */
   folder?: string;
   usageCount: number;
+  /** When its contents last changed, in Unix milliseconds. Kept by the backend. */
+  updatedAt?: number;
 };
 
 export type PasteMode = "paste" | "copy";
@@ -71,6 +73,8 @@ export type Settings = {
   clipboardLimit: number;
   /** Whether your other machines may fetch this library over Tailscale. */
   shareOverTailscale: boolean;
+  /** Keep this library the same as your other machines that have this on too. */
+  sync: boolean;
 };
 
 export type Library = {
@@ -79,6 +83,8 @@ export type Library = {
   macros: Macro[];
   /** Use counts for folder macros, which cannot carry their own. */
   folderUsage?: Record<string, number>;
+  /** Deleted macros by id, and when — remembered so a deletion can be synced. */
+  deleted?: Record<string, number>;
 };
 
 /** Which download tools are installed, and where. */

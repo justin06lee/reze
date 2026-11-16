@@ -9,6 +9,7 @@ mod login;
 mod merge;
 mod paste;
 mod store;
+mod sync;
 mod tailnet;
 mod typed;
 #[cfg(target_os = "linux")]
@@ -72,7 +73,13 @@ fn save_library(
     // that the next scan would then duplicate.
     library.macros.retain(|m| m.folder.is_none());
 
-    let previous_folders = store::load().map(|l| l.settings.folders).unwrap_or_default();
+    // What changed, and when, is worked out here against what is on disk —
+    // not taken from the window, which sends back whatever it was last shown.
+    let previous = store::load().ok();
+    if let Some(previous) = &previous {
+        sync::stamp(previous, &mut library, sync::now());
+    }
+    let previous_folders = previous.map(|l| l.settings.folders).unwrap_or_default();
     let written = store::save(&library)?;
     *state.last_written.lock().unwrap() = written;
     // Saving is the only moment the set of referenced files can shrink, so it is
@@ -486,6 +493,10 @@ fn run_import(
 
     // Files first, library last — see `collect` for why the order matters.
     let collected = theirs.collect(&mut result, &assets::assets_dir())?;
+
+    // An import is a change like any other, and has to be dated like one for
+    // the other machines to hear of it.
+    sync::stamp(&mine, &mut result.library, sync::now());
 
     // The one write in this app that replaces macros nobody had open in front
     // of them, so the library as it is goes aside first — see `undo_import`.

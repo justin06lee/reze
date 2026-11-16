@@ -36,6 +36,16 @@ pub struct Macro {
     pub folder: Option<String>,
     #[serde(default)]
     pub usage_count: u64,
+    /// When what this macro *is* last changed, in milliseconds since 1970 —
+    /// not when it was last used. Zero for one written before this existed.
+    /// It is how two machines that both have a macro decide whose version is
+    /// the newer one. See [`crate::sync`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub updated_at: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +84,11 @@ pub struct Settings {
     /// nothing answers to anyone but devices signed in as the same user.
     #[serde(default = "default_true")]
     pub share_over_tailscale: bool,
+    /// Keep this library the same as the one on every other machine of this
+    /// user's that has this switched on too. Off unless asked for: it is the
+    /// one setting that lets another machine change what is here.
+    #[serde(default)]
+    pub sync: bool,
 }
 
 /// Seeded rather than left empty so grabbing works the moment it is pressed,
@@ -121,6 +136,7 @@ impl Default for Settings {
             clipboard_history: true,
             clipboard_limit: crate::history::default_limit(),
             share_over_tailscale: true,
+            sync: false,
         }
     }
 }
@@ -141,6 +157,14 @@ pub struct Library {
     /// you reach for daily still climbs the palette.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub folder_usage: std::collections::BTreeMap<String, u64>,
+    /// Macros that were deleted, by id, and when.
+    ///
+    /// A deletion has to be remembered to be synced. A macro that is merely
+    /// absent here looks, to a machine that still has it, exactly like one
+    /// this machine has not heard of yet — and it would be handed straight
+    /// back. See [`crate::sync`].
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub deleted: std::collections::BTreeMap<String, u64>,
 }
 
 fn default_version() -> u32 {
@@ -154,6 +178,7 @@ impl Default for Library {
             settings: Settings::default(),
             macros: seed_macros(),
             folder_usage: Default::default(),
+            deleted: Default::default(),
         }
     }
 }
@@ -299,7 +324,22 @@ fn m(name: &str, description: &str, tags: &[&str], body: &str) -> Macro {
         attachments: Vec::new(),
         folder: None,
         usage_count: 0,
+        updated_at: 0,
     }
+}
+
+/// Whether `candidate` is still exactly a starter macro, untouched.
+///
+/// Every install writes the same starter set, so a pristine one is the oldest
+/// version of that macro there can be: any machine's edit of it is newer.
+pub fn is_seed(candidate: &Macro) -> bool {
+    candidate.attachments.is_empty()
+        && seed_macros().iter().any(|seed| {
+            seed.name == candidate.name
+                && seed.description == candidate.description
+                && seed.tags == candidate.tags
+                && seed.body == candidate.body
+        })
 }
 
 /// Starter set, written on first launch. Meant to be edited, not treated as gospel.
