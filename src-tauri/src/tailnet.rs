@@ -113,18 +113,32 @@ fn cli() -> Option<String> {
     crate::grab::which("tailscale")
 }
 
+/// The CLI, about to be asked `args`.
+fn ask(cli: &str, args: &[&str]) -> Command {
+    let mut command = Command::new(cli);
+    command
+        .args(args)
+        // On macOS the app's binary is the GUI and the CLI both, and it decides
+        // which to be from how it was started. Started by an app that launchd
+        // started — which is what Reze is — it takes itself for the GUI, finds
+        // one already running, and prints an apology where the JSON should be.
+        // This is Tailscale's own switch for saying which was meant. A machine
+        // that happens to have it set for every app hides the problem
+        // entirely, which is how it went unnoticed on the one this was written
+        // on. Nothing reads it on Linux.
+        .env("TAILSCALE_BE_CLI", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
 /// Run the CLI and return what it printed, or `None` if it failed.
 ///
 /// Standard output only: a CLI that is not the same version as its daemon says
 /// so on standard error, on every call, ahead of perfectly good JSON.
 fn tailscale(cli: &str, args: &[&str]) -> Option<Vec<u8>> {
-    let mut child = Command::new(cli)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+    let mut child = ask(cli, args).spawn().ok()?;
 
     // Drained on a thread of its own. The status of a tailnet with more than a
     // few machines is larger than a pipe holds, and a child blocked writing to
@@ -1060,6 +1074,18 @@ mod tests {
                 "TailscaleIPs": ["100.64.0.10"] }
         }
     }"#;
+
+    #[test]
+    fn the_app_binary_is_told_to_be_a_cli() {
+        // Without this the Tailscale app, asked anything by another app, tries
+        // to launch its GUI instead of answering — and every machine that does
+        // not set the variable globally shows up as having no Tailscale.
+        let command = ask("/Applications/Tailscale.app/Contents/MacOS/Tailscale", &["status"]);
+        let told = command
+            .get_envs()
+            .any(|(name, value)| name == "TAILSCALE_BE_CLI" && value == Some("1".as_ref()));
+        assert!(told);
+    }
 
     #[test]
     fn lists_this_users_own_computers_and_nothing_else() {
