@@ -514,6 +514,10 @@
   color: var(--fg-faint);
 }
 
+.e-check em code {
+  font: 11px ui-monospace, "SF Mono", Menlo, monospace;
+}
+
 .e-syntax {
   list-style: none;
   margin: 0;
@@ -948,6 +952,12 @@ html[data-platform="other"] .e-titlebar {
 .e-devices-empty {
   padding: 8px 10px;
   color: var(--fg-faint);
+}
+
+/* Why a machine is not being synced with, under the machine it is about. */
+.e-devices > li > .e-warn {
+  margin: 0;
+  padding: 0 10px 8px 25px;
 }
 
 /* What importing would do, opened under the machine it would come from. */

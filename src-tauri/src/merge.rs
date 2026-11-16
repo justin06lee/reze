@@ -76,7 +76,7 @@ enum Fate {
 }
 
 /// Triggers are matched the way expand-in-place matches them: case ignored.
-fn key(name: &str) -> String {
+pub(crate) fn key(name: &str) -> String {
     name.trim().to_lowercase()
 }
 
@@ -84,7 +84,7 @@ fn key(name: &str) -> String {
 ///
 /// Use counts are not part of it — they say how often a macro was reached for
 /// on one machine, not what it is — and neither is the id.
-fn alike(a: &Macro, b: &Macro) -> bool {
+pub(crate) fn alike(a: &Macro, b: &Macro) -> bool {
     a.name == b.name
         && a.description == b.description
         && a.tags == b.tags
@@ -99,7 +99,7 @@ fn alike(a: &Macro, b: &Macro) -> bool {
 /// held to the same rules a local one is, plus one: an attachment may only name
 /// a file in the asset library. A `path` is an absolute path on *that* machine,
 /// which here is either nothing or — worse — something else entirely.
-fn portable(theirs: &Library) -> Vec<Macro> {
+pub(crate) fn portable(theirs: &Library) -> Vec<Macro> {
     theirs
         .macros
         .iter()
@@ -116,8 +116,8 @@ fn portable(theirs: &Library) -> Vec<Macro> {
         .collect()
 }
 
-/// Decide, for each of their macros, which of ours it is.
-fn pair(mine: &[Macro], theirs: &[Macro]) -> Vec<Fate> {
+/// Find, for each of their macros, the index of the one of ours it is.
+pub(crate) fn counterparts(mine: &[Macro], theirs: &[Macro]) -> Vec<Option<usize>> {
     let mut taken = vec![false; mine.len()];
     let mut matched: Vec<Option<usize>> = vec![None; theirs.len()];
 
@@ -142,10 +142,14 @@ fn pair(mine: &[Macro], theirs: &[Macro]) -> Vec<Fate> {
             matched[t] = Some(i);
         }
     }
+    matched
+}
 
+/// Decide, for each of their macros, which of ours it is and how it differs.
+fn pair(mine: &[Macro], theirs: &[Macro]) -> Vec<Fate> {
     theirs
         .iter()
-        .zip(matched)
+        .zip(counterparts(mine, theirs))
         .map(|(theirs, at)| match at {
             None => Fate::New,
             Some(i) if alike(&mine[i], theirs) => Fate::Same(i),
@@ -162,7 +166,7 @@ fn pair(mine: &[Macro], theirs: &[Macro]) -> Vec<Fate> {
 pub fn check(theirs: &Library) -> Result<(), String> {
     if theirs.version > FORMAT_VERSION {
         return Err(
-            "That machine runs a newer Reze than this one. Update this one, then import.".into(),
+            "That machine runs a newer Reze than this one. Update this one first.".into(),
         );
     }
     Ok(())
@@ -294,6 +298,7 @@ pub fn merge(mine: &Library, theirs: &Library, choices: Choices) -> Merged {
             macros,
             // Keyed by paths in this machine's folders; theirs mean nothing here.
             folder_usage: mine.folder_usage.clone(),
+            deleted: mine.deleted.clone(),
         },
         added: added.len(),
         updated,
@@ -338,6 +343,7 @@ mod tests {
             attachments: Vec::new(),
             folder: None,
             usage_count: 0,
+            updated_at: 0,
         }
     }
 
@@ -359,6 +365,7 @@ mod tests {
             settings: Settings::default(),
             macros,
             folder_usage: Default::default(),
+            deleted: Default::default(),
         }
     }
 

@@ -116,6 +116,7 @@ fn macro_for(root: &Path, path: &Path, usage: &BTreeMap<String, u64>) -> Option<
         body: String::new(),
         attachments: vec![assets::referencing(path, bytes)],
         folder: Some(root.to_string_lossy().to_string()),
+        updated_at: 0,
     })
 }
 
