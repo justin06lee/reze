@@ -62,45 +62,52 @@ fn get_library() -> Result<Library, String> {
     merged()
 }
 
-#[tauri::command]
-fn save_library(
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
-    mut library: Library,
-) -> Result<(), String> {
-    // Folder macros are rebuilt from the folder on every scan. Writing them here
-    // would persist a snapshot that goes stale the moment a file is renamed, and
-    // that the next scan would then duplicate.
-    library.macros.retain(|m| m.folder.is_none());
-
-    // What changed, and when, is worked out here against what is on disk —
-    // not taken from the window, which sends back whatever it was last shown.
-    let previous = store::load().ok();
-    if let Some(previous) = &previous {
-        sync::stamp(previous, &mut library, sync::now());
+/// Tell both windows the library is different now.
+///
+/// The merged view, not what was written — the windows must not lose their
+/// folder macros just because something saved a change to another one.
+pub(crate) fn library_changed(app: &AppHandle) {
+    if let Ok(library) = merged() {
+        let _ = app.emit("library-changed", &library);
     }
-    let previous_folders = previous.map(|l| l.settings.folders).unwrap_or_default();
-    let written = store::save(&library)?;
-    *state.last_written.lock().unwrap() = written;
+}
+
+/// Save what the editor did — see [`sync::Changes`] for why it is that, and
+/// not the library as the editor has it.
+#[tauri::command]
+fn save_library(app: AppHandle, changes: sync::Changes) -> Result<(), String> {
+    let library = {
+        let _writing = store::lock();
+        // Read rather than assumed, and a file that will not read is not
+        // written over: it is the source of truth, and somebody is probably
+        // halfway through editing it by hand.
+        let before = store::load()?;
+        let library = sync::apply(&before, changes, sync::now());
+        // Switching sync on lets other machines change this library with
+        // nobody watching, starting with a merge of everything they have. So
+        // the library as it is goes aside first, as it does for an import.
+        if library.settings.syncs() && !before.settings.syncs() {
+            store::backup()?;
+        }
+        store::save(&library)?;
+        library
+    };
     // Saving is the only moment the set of referenced files can shrink, so it is
     // the only moment worth looking for orphans.
     assets::sweep(&library);
 
-    if previous_folders != library.settings.folders {
-        watch_folders(&app, &library.settings.folders);
-    }
     history::configure(&library.settings);
     tailnet::configure(&library.settings);
+    tailnet::sync_soon();
 
-    // Hand back the merged view, not what was written — the windows must not
-    // lose their folder macros just because they saved an edit to another one.
-    app.emit("library-changed", &merged().unwrap_or(library)).ok();
+    library_changed(&app);
     Ok(())
 }
 
 /// Increment the use counter so the palette can rank by what you actually reach for.
 #[tauri::command]
-fn bump_usage(state: tauri::State<'_, AppState>, id: String) -> Result<(), String> {
+fn bump_usage(id: String) -> Result<(), String> {
+    let _writing = store::lock();
     let mut lib = store::load()?;
     if id.starts_with("folder:") {
         // A folder macro is not in this file and cannot carry its own count —
@@ -111,8 +118,7 @@ fn bump_usage(state: tauri::State<'_, AppState>, id: String) -> Result<(), Strin
     } else {
         return Ok(()); // gone since the palette listed it; nothing to record
     }
-    let written = store::save(&lib)?;
-    *state.last_written.lock().unwrap() = written;
+    store::save(&lib)?;
     Ok(())
 }
 
@@ -238,18 +244,17 @@ fn attachment_paths(attachments: &[assets::Attachment]) -> Vec<PathBuf> {
 
 /// Replace the watched folder list, then rescan.
 #[tauri::command]
-fn set_folders(
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
-    folders: Vec<String>,
-) -> Result<(), String> {
-    let mut library = store::load()?;
-    library.settings.folders = folders;
-    let written = store::save(&library)?;
-    *state.last_written.lock().unwrap() = written;
+fn set_folders(app: AppHandle, folders: Vec<String>) -> Result<(), String> {
+    let library = {
+        let _writing = store::lock();
+        let mut library = store::load()?;
+        library.settings.folders = folders;
+        store::save(&library)?;
+        library
+    };
 
     watch_folders(&app, &library.settings.folders);
-    app.emit("library-changed", &merged()?).ok();
+    library_changed(&app);
     Ok(())
 }
 
@@ -480,19 +485,33 @@ fn run_import(
     // Fetched again rather than carried over from the preview: what gets
     // merged should be what is there now, not what was there when asked.
     let theirs = tailnet::library_of(address)?;
-    let mine = store::load()?;
-    let mut result = merge::merge(
-        &mine,
-        &theirs.library,
-        merge::Choices {
-            replace,
-            settings,
-            hotkeys: settings && theirs.hello.os == std::env::consts::OS,
-        },
-    );
+    let choices = merge::Choices {
+        replace,
+        settings,
+        hotkeys: settings && theirs.hello.os == std::env::consts::OS,
+    };
 
     // Files first, library last — see `collect` for why the order matters.
-    let collected = theirs.collect(&mut result, &assets::assets_dir())?;
+    // They are fetched for the merge as it would come out now; the merge that
+    // is kept is made again below, once nothing else can write, because a
+    // fetch takes long enough for the editor or a sync to save in the middle.
+    let planned = merge::merge(&store::load()?, &theirs.library, choices);
+    let collected = theirs.collect(&planned.incoming, &assets::assets_dir())?;
+
+    let writing = store::lock();
+    let mine = store::load()?;
+    let mut result = merge::merge(&mine, &theirs.library, choices);
+    let unfetched = |a: &assets::Attachment| {
+        !collected.gone.contains(&a.file) && !assets::path_for(&a.file).is_ok_and(|p| p.exists())
+    };
+    if result.incoming.iter().any(unfetched) {
+        return Err(
+            "The library here changed while the import was fetching files. Nothing was \
+             changed — import again."
+                .into(),
+        );
+    }
+    collected.strip(&mut result.library);
 
     // An import is a change like any other, and has to be dated like one for
     // the other machines to hear of it.
@@ -522,15 +541,13 @@ fn run_import(
         }
     }
 
-    let written = match store::save(&result.library) {
-        Ok(written) => written,
-        Err(e) => {
-            let _ = rebind(&before);
-            return Err(e);
-        }
-    };
-    *app.state::<AppState>().last_written.lock().unwrap() = written;
+    if let Err(e) = store::save(&result.library) {
+        let _ = rebind(&before);
+        return Err(e);
+    }
+    drop(writing);
     history::configure(&result.library.settings);
+    tailnet::sync_soon();
 
     let outcome = ImportOutcome {
         from: theirs.name,
@@ -541,16 +558,24 @@ fn run_import(
         missing: collected.missing,
         warnings,
     };
-    app.emit("library-changed", &merged().unwrap_or(result.library)).ok();
+    library_changed(app);
     Ok(outcome)
 }
 
 /// Put the library back the way it was before the last import.
+///
+/// Exactly as it was, dates and all — which is why it is not offered while
+/// sync is on. Put back like this, the macros an import brought are merely
+/// absent, and the other machines hand them straight back; and the way to
+/// make their absence stick is to record them as deleted, which would delete
+/// them from the machine they were imported from.
 #[tauri::command]
-fn undo_import(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let folders_before = store::load().map(|l| l.settings.folders).unwrap_or_default();
-    let (library, raw) = store::restore_backup()?;
-    *state.last_written.lock().unwrap() = raw;
+fn undo_import(app: AppHandle) -> Result<(), String> {
+    let (library, folders_before) = {
+        let _writing = store::lock();
+        let folders_before = store::load().map(|l| l.settings.folders).unwrap_or_default();
+        (store::restore_backup()?, folders_before)
+    };
 
     // Everything a save would have re-pointed, since the settings may have
     // gone back with the macros.
@@ -563,8 +588,9 @@ fn undo_import(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), 
     }
     history::configure(s);
     tailnet::configure(s);
+    tailnet::sync_soon();
 
-    app.emit("library-changed", &merged().unwrap_or(library)).ok();
+    library_changed(&app);
     Ok(())
 }
 
@@ -1243,29 +1269,63 @@ fn spawn_watcher(app: AppHandle) {
             // Editors often write in several steps; let it land before reading.
             std::thread::sleep(Duration::from_millis(80));
 
-            let Ok(raw) = std::fs::read_to_string(store::library_path()) else {
-                continue;
-            };
-            {
-                let state = app.state::<AppState>();
-                let mut last = state.last_written.lock().unwrap();
-                if *last == raw {
-                    continue; // our own save
+            match take_hand_edit() {
+                None => {}
+                Some(Ok(edited)) => {
+                    // The switches these two mirror are in the file too.
+                    history::configure(&edited.settings);
+                    tailnet::configure(&edited.settings);
+                    library_changed(&app);
+                    tailnet::sync_soon();
                 }
-                *last = raw.clone();
-            }
-            match serde_json::from_str::<Library>(&raw) {
-                Ok(lib) => {
-                    // Merged, not as parsed: the file holds only what was
-                    // authored, and the windows need the folder macros with it.
-                    let _ = app.emit("library-changed", &merged().unwrap_or(lib));
-                }
-                Err(e) => {
-                    let _ = app.emit("library-error", e.to_string());
+                Some(Err(e)) => {
+                    let _ = app.emit("library-error", e);
                 }
             }
         }
     });
+}
+
+/// Take the library file as it now is, if it is not as we left it.
+///
+/// `None` when it is — the change was our own save — and otherwise the
+/// library that is there now, or why it is not one.
+fn take_hand_edit() -> Option<Result<Library, String>> {
+    // Held while looking, so that a save of ours is either not begun or
+    // finished and remembered — never caught in between and taken for
+    // somebody else's.
+    let _writing = store::lock();
+    let raw = std::fs::read_to_string(store::library_path()).ok()?;
+    let ours = store::last_written();
+    if ours == raw {
+        return None;
+    }
+    store::remember(&raw);
+
+    let mut edited: Library = match serde_json::from_str(&raw) {
+        Ok(edited) => edited,
+        Err(e) => return Some(Err(e.to_string())),
+    };
+    // An edit made in a text editor is a change like any other, and has to be
+    // dated like one for the other machines to hear of it. Dated against what
+    // we last wrote, which is the library as it was before the edit — unless
+    // that was not a library either, and then there is nothing to go by.
+    if let Ok(before) = serde_json::from_str::<Library>(&ours) {
+        let dates = |l: &Library| {
+            let macros: Vec<u64> = l.macros.iter().map(|m| m.updated_at).collect();
+            (macros, l.deleted.clone())
+        };
+        let as_written = dates(&edited);
+        sync::stamp(&before, &mut edited, sync::now());
+        // Written back only if dating it changed something: an edit to a
+        // setting leaves the file exactly as its author saved it.
+        if dates(&edited) != as_written {
+            if let Err(e) = store::save(&edited) {
+                eprintln!("reze: could not date a hand edit: {e}");
+            }
+        }
+    }
+    Some(Ok(edited))
 }
 
 // ---------------------------------------------------------------- setup
@@ -1359,10 +1419,22 @@ pub fn run() {
                 }
             }
 
-            let lib = store::load().unwrap_or_default();
-            if let Ok(body) = store::serialize(&lib) {
-                *app.state::<AppState>().last_written.lock().unwrap() = body;
-            }
+            // What is on disk is remembered as it is, so that the first edit
+            // made to it by hand can be told from our own saves and dated. A
+            // file that does not load is remembered as nothing: there is no
+            // library there to date an edit against.
+            let lib = match store::load() {
+                Ok(lib) => {
+                    if let Ok(raw) = std::fs::read_to_string(store::library_path()) {
+                        store::remember(&raw);
+                    }
+                    lib
+                }
+                Err(e) => {
+                    eprintln!("reze: {e}");
+                    Library::default()
+                }
+            };
 
             if let Err(e) = register_hotkeys(
                 &handle,

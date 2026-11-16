@@ -545,7 +545,8 @@ the editor rather than recursing forever.
 Everything lives in `~/.reze/macros.json`, and **that file is the source of
 truth** — the GUI is a convenience layer over it. Edit it in any text editor and
 Reze picks up the change immediately; edit it in the app and your editor sees
-the change on next read. Diff it, commit it, sync it however you like.
+the change on next read. Diff it, commit it, back it up however you like — and
+to have it on every machine you use, [switch sync on](#keeping-them-in-sync).
 
 ```jsonc
 {
@@ -560,7 +561,8 @@ the change on next read. Diff it, commit it, sync it however you like.
     "clipboardHotkey": "CmdOrCtrl+Shift+V",
     "clipboardHistory": true,    // remember what you copy
     "clipboardLimit": 200,
-    "shareOverTailscale": true   // let your other machines import this
+    "shareOverTailscale": true,  // let your other machines import this
+    "sync": false                // keep it the same as theirs — see Other devices
   },
   "macros": [
     {
@@ -570,11 +572,21 @@ the change on next read. Diff it, commit it, sync it however you like.
       "tags": ["review"],
       "body": "{{> rigor}}\n\nFully and thoroughly analyze {{target|this codebase}}…",
       "attachments": [], // see Attachments
-      "usageCount": 0
+      "usageCount": 0,
+      "updatedAt": 1794800000000 // when it last changed; Reze keeps this
     }
-  ]
+  ],
+  "deleted": { "…": 1794800000000 } // macros deleted, by id, and when
 }
 ```
+
+`updatedAt` and `deleted` are how two machines work out whose version of a
+macro is the newer one, and that a macro missing from one of them was deleted
+rather than never there. Reze writes both — you never have to. Edit a macro by
+hand and Reze dates the change for you, writing the new `updatedAt` back into
+the file a moment after you save; delete one by hand and it is added to
+`deleted`. That is only true while Reze is running, which is the one reason to
+prefer editing with it open.
 
 The [clipboard history](#clipboard-history) is deliberately *not* in here — it
 has its own file, `~/.reze/clipboard.json`, because this one is watched for
@@ -587,18 +599,61 @@ Reze reads them back from the OS instead of remembering them.
 
 ## Other devices
 
-With [Tailscale](https://tailscale.com) running, Reze can copy the library from
-another of your machines. **Settings → Other devices** lists them, says which
-have a Reze answering, and imports from any that do:
+With [Tailscale](https://tailscale.com) running, Reze can keep one library on
+all of your machines, or copy it from one to another once. **Settings → Other
+devices** lists them and says which have a Reze answering:
 
 ```
 ● Tailscale is connected. This machine is mac-mini            Look again
 ┌──────────────────────────────────────────────────────────────────────┐
-│ ● tenet   Linux                 16 macros · 5 attachments   Import… │
+│ ● laptop  macOS       25 macros · 12 attachments · in sync  Import… │
+│ ● tenet   Linux   16 macros · 5 attachments · sync is off there  …  │
 │ ○ midna   Linux                             Reze is not answering   │
-│ ○ laptop  macOS                                           offline   │
 └──────────────────────────────────────────────────────────────────────┘
+ [x] Keep my devices in sync
+ [x] Let my other devices import from this one
 ```
+
+### Keeping them in sync
+
+Tick **Keep my devices in sync** on each machine that should share the
+library. From then on a macro added, edited or deleted on one of them is added,
+edited or deleted on the others — within a few seconds while both are awake and
+on the tailnet, and the next time they meet otherwise. A laptop that was shut
+for a week catches up when it opens, and brings along whatever was written on
+it in the meantime.
+
+- **It takes both.** A machine only syncs with machines that have the box
+  ticked too. One that has not is left exactly as it is, and says *sync is off
+  there* in the list.
+- **Macros and their attachments, nothing else.** Settings, hotkeys, watched
+  folders and the macros made from them, the clipboard history and the use
+  counts that rank the palette all stay each machine's own.
+- **The later change wins, a macro at a time.** If the same macro was edited
+  on two machines before they next met, the edit made last is kept, whole —
+  there is no merging inside a macro. Edits to *different* macros never
+  conflict. A deletion is a change like any other: it beats an older edit and
+  loses to a newer one.
+- **The first sync is a merge.** Nothing is thrown away to make two libraries
+  agree: each machine gets what only the other had. Macros both have are
+  matched by id or, failing that, by trigger, so two installs' starter macros
+  meet as one — and an untouched starter macro always gives way to one that
+  has been edited. Macros last edited before Reze dated changes carry no date
+  to compare; where two of those differ, one is picked, the same one on both
+  machines.
+- **The library is set aside first.** Ticking the box copies it to
+  `~/.reze/backups/` before anything arrives, the way an import does.
+
+Later is by each machine's own clock, so two machines whose clocks disagree by
+a minute can get a same-minute conflict backwards. An edit always outranks the
+version it was made from, whatever the clocks say.
+
+If a machine cannot be synced with, the list says so under its name and why.
+Sync needs **Let my other devices import from this one** as well — it is
+fetching in both directions — so ticking one ticks the other, and switching
+sharing off switches sync off.
+
+### Importing once
 
 **Import…** fetches that machine's library and says what would happen before
 anything does:
@@ -628,12 +683,19 @@ The library as it was is set aside in `~/.reze/backups/` first — the last five
 are kept, along with the attachments they name — and **Undo**, which appears
 the moment an import finishes, puts the newest one back.
 
+With sync on, an import still works — it is how to bring over another
+machine's settings, or the library of one that does not sync — but what it
+brings goes on to the other machines like any other change, and so does what a
+*Replace* removes. There is no Undo for it then: the copy in
+`~/.reze/backups/` is still made, but putting it back by itself would only
+have the other machines hand the macros back.
+
 ### What is listening
 
-To be imported *from*, a Reze answers on port 7393 of its machine's Tailscale
-address. Tailscale already encrypts the connection and knows who is on the
-other end of it, so Reze adds no accounts, keys or pairing of its own — and
-keeps what it does to three rules:
+To be imported from, or synced with, a Reze answers on port 7393 of its
+machine's Tailscale address. Tailscale already encrypts the connection and
+knows who is on the other end of it, so Reze adds no accounts, keys or pairing
+of its own — and keeps what it does to three rules:
 
 - **Only that address.** Not the local network, not the internet: nothing off
   your tailnet can open a connection at all.
@@ -643,17 +705,23 @@ keeps what it does to three rules:
   refused whatever it asks for.
 - **Only reading.** It hands over `macros.json` and the attachment files that
   names. No request changes anything; importing is something the other machine
-  does to itself.
+  does to itself. Sync is the same thing done unasked: each machine fetches
+  from the others and changes only itself, and nothing is ever pushed. The one
+  request that is not a fetch, `/poke`, says "I have something new" — and all
+  the machine hearing it does is go and look, at the machines it would have
+  looked at within the minute anyway.
 
 **Let my other devices import from this one** switches it off, and then nothing
 listens. It is on by default so that a second machine finds the first without
-a trip back to it.
+a trip back to it. **Keep my devices in sync** is off by default: it is the one
+setting that lets another machine change what is on this one.
 
 Both machines need Tailscale signed in as the same user and a Reze new enough
 to have this. If a machine shows as *not answering* and Reze is running there,
 a firewall is the usual reason — with `ufw`, `sudo ufw allow in on tailscale0`.
 It is plain HTTP inside the tunnel, so `curl http://tenet:7393/reze` shows what
-another Reze would see.
+another Reze would see — including whether sync is on there, and a `revision`
+that is the same on two machines exactly when their libraries are.
 
 ## Typing awareness
 
@@ -733,8 +801,9 @@ bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/b
 - `src-tauri/src/focus.rs` — remembering who had focus, and pasteboard change detection
 - `src-tauri/src/login.rs` — the launch-at-login switch, via `SMAppService` (an XDG autostart entry on Linux)
 - `src-tauri/src/x11.rs` — Linux: focus, app names and icons, terminals (`cargo test`)
-- `src-tauri/src/tailnet.rs` — other machines over Tailscale: finding them, answering them, asking them (`cargo test`)
+- `src-tauri/src/tailnet.rs` — other machines over Tailscale: finding them, answering them, asking them, syncing with them (`cargo test`)
 - `src-tauri/src/merge.rs` — what importing another library does to this one (`cargo test`)
+- `src-tauri/src/sync.rs` — dating changes, and what two libraries that sync come to (`cargo test`)
 - `src-tauri/src/lib.rs` — windows, tray, global hotkeys, file watcher, IPC commands
 - `src/lib/template.ts` — the template language (variables, includes, built-ins)
 - `src/lib/fuzzy.ts` — the palette's ranking

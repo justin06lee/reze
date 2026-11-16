@@ -87,6 +87,22 @@ export type Library = {
   deleted?: Record<string, number>;
 };
 
+/**
+ * What the editor did since it last saved — never the library as it has it.
+ *
+ * A window only knows what it was last shown. Sent back whole, a library that
+ * is missing a macro another machine added a second ago would read as that
+ * macro being deleted here; a list of what was actually done cannot.
+ */
+export type Changes = {
+  /** Macros added or edited, as they are now. */
+  macros: Macro[];
+  /** Ids of macros that were deleted. */
+  removed: string[];
+  /** The settings, if one of them changed. */
+  settings: Settings | null;
+};
+
 /** Which download tools are installed, and where. */
 export type GrabTools = {
   ytDlp: string | null;
@@ -197,6 +213,10 @@ export type Hello = {
   os: string;
   macros: number;
   attachments: number;
+  /** Whether it has sync switched on. It takes both machines saying so. */
+  sync: boolean;
+  /** What its library holds. The same as this machine's means in sync. */
+  revision: string;
 };
 
 /** One of your other machines on the tailnet. */
@@ -210,6 +230,8 @@ export type Device = {
   online: boolean;
   /** What answered there, or `null` if no Reze did. */
   reze: Hello | null;
+  /** Why the last attempt to sync with it came to nothing, if it did. */
+  trouble: string | null;
 };
 
 /**
@@ -230,6 +252,8 @@ export type Tailnet =
       listening: boolean;
       /** Why not, if it should be and could not. */
       problem: string | null;
+      /** What this machine's library holds — see `Hello.revision`. */
+      revision: string;
       devices: Device[];
     };
 

@@ -23,7 +23,14 @@
 //! What it hands out is `macros.json` and the attachment files that names.
 //! Never the clipboard history, and never anything from a watched folder.
 //!
-//! The conversation is plain HTTP — three GETs — so that `curl` can take
+//! Keeping machines the same — the last section here, deciding with
+//! [`crate::sync`] — is that conversation held without being asked, and under
+//! the same three rules. Each machine with sync on fetches the others'
+//! libraries and changes itself; nothing is ever pushed. What looks like a
+//! push, a macro saved here turning up there a second later, is this machine
+//! saying there is something to fetch (`/poke`) and that one fetching it.
+//!
+//! The conversation is plain HTTP — four GETs — so that `curl` can take
 //! either side of it when something needs debugging. It is written out by hand
 //! at both ends rather than pulled in as a server and a client: one side of
 //! each exchange is always this same file, so "HTTP" here only has to mean the
@@ -33,9 +40,10 @@
 //! the downloaders, and for the same reason: it is the interface that is the
 //! same on every platform and that Tailscale keeps working.
 
+use crate::assets::Attachment;
 use crate::store::Library;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
@@ -94,6 +102,25 @@ const MAX_LIBRARY: u64 = 64 * 1024 * 1024;
 /// How many connections to be answering at once. An import asks for one thing
 /// at a time, so this is only ever reached by something misbehaving.
 const MAX_CONNECTIONS: usize = 16;
+
+/// How often to compare notes with the other machines when nothing prompts
+/// it. What prompts it — a save here, a word from there — is what makes sync
+/// quick; this is what makes it certain, for the machine that was asleep or
+/// off the tailnet when the word was sent.
+const SYNC_EVERY: Duration = Duration::from_secs(60);
+
+/// How long to wait once prompted. A save is rarely alone — typing is one
+/// every half second — and one round can carry all of them.
+const SETTLE: Duration = Duration::from_millis(750);
+
+/// How soon to look again after telling a machine there is something to
+/// fetch: long enough for it to have done so, so that Settings can say the
+/// two agree instead of leaving them a minute apart on the screen.
+const FOLLOW_UP: Duration = Duration::from_secs(3);
+
+/// How many times to start a sync over because the library here changed
+/// while its files were on their way.
+const ATTEMPTS: usize = 4;
 
 // ---------------------------------------------------------------- tailscale
 
@@ -366,6 +393,7 @@ fn routed_address() -> Option<Ipv4Addr> {
 
 /// What is on offer: the library file, and the directory its attachments are
 /// in. Passed in rather than looked up so the tests can serve a scratch one.
+#[cfg_attr(test, derive(Clone))]
 struct Shelf {
     library: PathBuf,
     assets: PathBuf,
@@ -382,6 +410,25 @@ impl Shelf {
     fn read(&self) -> Option<Library> {
         serde_json::from_slice(&std::fs::read(&self.library).ok()?).ok()
     }
+
+    /// Replace the library on it — which only a sync does, and only to ours.
+    fn write(&self, library: &Library) -> Result<(), String> {
+        match self.library == crate::store::library_path() {
+            // Through the store, which remembers what it wrote so that the
+            // file watcher does not take it for a hand edit.
+            true => crate::store::save(library).map(drop),
+            false => crate::store::write(&self.library, library).map(drop),
+        }
+    }
+
+    fn revision(&self) -> Option<String> {
+        self.read().map(|library| crate::sync::revision(&library))
+    }
+
+    /// Whether an attachment's file is here.
+    fn has(&self, attachment: &Attachment) -> bool {
+        crate::assets::bare_name(&self.assets, &attachment.file).is_ok_and(|path| path.exists())
+    }
 }
 
 /// What a machine says about itself when asked whether Reze is there.
@@ -397,6 +444,14 @@ pub struct Hello {
     pub macros: usize,
     #[serde(default)]
     pub attachments: usize,
+    /// Whether it keeps itself the same as the machines that ask this — which
+    /// takes both saying so. Absent from a build that cannot, and so false.
+    #[serde(default)]
+    pub sync: bool,
+    /// What its library holds — see [`crate::sync::revision`]. Two machines
+    /// with the same one have nothing to fetch from each other.
+    #[serde(default)]
+    pub revision: String,
 }
 
 enum Reply {
@@ -418,8 +473,18 @@ fn answer(path: &str, shelf: &Shelf) -> Reply {
                 os: std::env::consts::OS.to_string(),
                 macros: library.macros.len(),
                 attachments: library.macros.iter().map(|m| m.attachments.len()).sum(),
+                sync: library.settings.syncs(),
+                revision: crate::sync::revision(&library),
             };
             Reply::Json(serde_json::to_vec(&hello).unwrap_or_default())
+        }
+        // "There is something here for you." Nothing is taken on the word of
+        // whoever says it: all it does is bring forward the look this machine
+        // would have taken within the minute anyway, at the machines it would
+        // have looked at anyway.
+        "/poke" => {
+            sync_soon();
+            Reply::Json(b"{}".to_vec())
         }
         // The file as it is, rather than parsed and written out again: it is
         // the source of truth, and the other side reads it the way this one
@@ -553,23 +618,29 @@ static SUPERVISOR: OnceLock<std::thread::Thread> = OnceLock::new();
 /// Connections being answered at this moment.
 static ANSWERING: AtomicUsize = AtomicUsize::new(0);
 
-/// Point the listener at the current settings.
+/// Point the listener, and the sync loop, at the current settings.
 pub fn configure(settings: &crate::store::Settings) {
-    if ENABLED.swap(settings.share_over_tailscale, Ordering::SeqCst)
-        != settings.share_over_tailscale
-    {
+    let share = settings.share_over_tailscale;
+    if ENABLED.swap(share, Ordering::SeqCst) != share {
         WAKE.store(true, Ordering::SeqCst);
         if let Some(thread) = SUPERVISOR.get() {
             thread.unpark();
         }
     }
+    let sync = settings.syncs();
+    if SYNCING.swap(sync, Ordering::SeqCst) != sync {
+        sync_soon();
+    }
 }
 
-/// Start listening whenever there is a tailnet to listen on, for as long as
-/// the app runs.
+/// Start listening whenever there is a tailnet to listen on, and syncing
+/// whenever that is switched on, for as long as the app runs.
 pub fn start(app: tauri::AppHandle) {
+    let syncing = app.clone();
     let handle = std::thread::spawn(move || supervise(app));
     let _ = SUPERVISOR.set(handle.thread().clone());
+    let handle = std::thread::spawn(move || keep_in_sync(syncing));
+    let _ = SYNCER.set(handle.thread().clone());
 }
 
 struct Serving {
@@ -668,6 +739,10 @@ fn supervise(app: tauri::AppHandle) {
 
             let listening = serving.is_some();
             let flipped = LISTENING.swap(listening, Ordering::SeqCst) != listening;
+            if flipped && listening {
+                // On a tailnet again: whatever was missed while off it.
+                sync_soon();
+            }
             if moved || flipped || problem_changed {
                 // Settings shows all of this, and may be open.
                 let _ = app.emit("tailnet-changed", ());
@@ -886,6 +961,9 @@ pub enum Tailnet {
         listening: bool,
         /// Why not, when it should be and tried.
         problem: Option<String>,
+        /// What this machine's library holds, to hold against each device's:
+        /// the same one means the two are in sync.
+        revision: String,
         devices: Vec<Device>,
     },
 }
@@ -900,6 +978,8 @@ pub struct Device {
     pub online: bool,
     /// What answered there, if a Reze did.
     pub reze: Option<Hello>,
+    /// Why the last attempt to sync with it came to nothing, if it did.
+    pub trouble: Option<String>,
 }
 
 /// Look at the tailnet and ask every machine on it whether Reze is there.
@@ -932,6 +1012,7 @@ pub fn status() -> Tailnet {
             os: peer.os,
             online: peer.online,
             reze: answer.and_then(|thread| thread.join().ok()).flatten(),
+            trouble: TROUBLE.lock().unwrap().get(&peer.address).cloned(),
         })
         .collect();
 
@@ -941,6 +1022,7 @@ pub fn status() -> Tailnet {
         port: PORT,
         listening: LISTENING.load(Ordering::SeqCst),
         problem: PROBLEM.lock().unwrap().clone(),
+        revision: Shelf::ours().revision().unwrap_or_default(),
         devices,
     }
 }
@@ -960,22 +1042,34 @@ pub struct Collected {
     /// How many files had to be fetched.
     pub fetched: usize,
     /// The names of attachments that machine's library has but its disk does
-    /// not, which were therefore taken off the macros that carried them.
+    /// not, for saying which were left off.
     pub missing: Vec<String>,
+    /// The same attachments, by the file each would have been.
+    pub gone: Vec<String>,
+}
+
+impl Collected {
+    /// Take the attachments that could not be had off the macros that carry
+    /// them. The macro is still worth having; a reference to nothing is not.
+    pub fn strip(&self, library: &mut Library) {
+        for m in &mut library.macros {
+            m.attachments.retain(|a| !self.gone.contains(&a.file));
+        }
+    }
 }
 
 impl Theirs {
-    /// Fetch into `dir` every file the merged library needs from this machine.
+    /// Fetch into `dir` every one of `incoming` — the files a merged library
+    /// needs from this machine.
     ///
     /// Run before the library is written, so that it never names a file that
     /// is not there. Until that write nothing has changed: a connection that
     /// drops halfway is an error with this machine exactly as it was, plus a
     /// few files the next sweep collects.
-    pub fn collect(&self, merged: &mut crate::merge::Merged, dir: &Path) -> Result<Collected, String> {
+    pub fn collect(&self, incoming: &[Attachment], dir: &Path) -> Result<Collected, String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
         let mut out = Collected::default();
-        let mut gone = Vec::new();
-        for attachment in &merged.incoming {
+        for attachment in incoming {
             let dest = crate::assets::bare_name(dir, &attachment.file)?;
             // Names are generated, never reused: the same name is the same file.
             if dest.exists() {
@@ -984,10 +1078,9 @@ impl Theirs {
             let path = format!("/assets/{}", encode(&attachment.file));
             match download(self.at, &path, &dest) {
                 Ok(()) => out.fetched += 1,
-                // Their library names a file their disk no longer has. The
-                // macro is still worth having; a reference to nothing is not.
+                // Their library names a file their disk no longer has.
                 Err(Failed::Status(404)) => {
-                    gone.push(attachment.file.clone());
+                    out.gone.push(attachment.file.clone());
                     out.missing.push(attachment.name.clone());
                 }
                 Err(e) => {
@@ -997,9 +1090,6 @@ impl Theirs {
                     ))
                 }
             }
-        }
-        for m in &mut merged.library.macros {
-            m.attachments.retain(|a| !gone.contains(&a.file));
         }
         Ok(out)
     }
@@ -1038,6 +1128,251 @@ pub fn library_of(address: &str) -> Result<Theirs, String> {
         library,
         at,
     })
+}
+
+// ------------------------------------------------------------------ syncing
+
+/// Whether to keep this library the same as the other machines'. Mirrored
+/// from settings, like [`ENABLED`].
+static SYNCING: AtomicBool = AtomicBool::new(false);
+
+static SYNCER: OnceLock<std::thread::Thread> = OnceLock::new();
+
+/// Why the last attempt to sync with a machine came to nothing, by its
+/// address, for Settings to show next to it.
+static TROUBLE: Mutex<BTreeMap<Ipv4Addr, String>> = Mutex::new(BTreeMap::new());
+
+/// Have the sync loop look now rather than at its next turn: something here
+/// changed, or another machine says something there did.
+pub fn sync_soon() {
+    if let Some(thread) = SYNCER.get() {
+        thread.unpark();
+    }
+}
+
+/// Keep this library the same as the ones on this user's other machines, for
+/// as long as that is switched on — here, and on each of them for itself.
+///
+/// Every round is the same and is all there is: ask each machine what it has,
+/// fetch from the ones that have something different, and tell the ones that
+/// are missing something of ours to come and do the same. Nothing depends on
+/// a round having happened, or on a word having arrived; a machine that was
+/// asleep through a week of changes is one round behind.
+fn keep_in_sync(app: tauri::AppHandle) {
+    let shelf = Shelf::ours();
+    let mut told = HashMap::new();
+    let mut stood = BTreeMap::new();
+    loop {
+        if !SYNCING.load(Ordering::SeqCst) {
+            stood.clear();
+            TROUBLE.lock().unwrap().clear();
+            std::thread::park_timeout(SYNC_EVERY);
+            continue;
+        }
+        std::thread::sleep(SETTLE);
+        let round = round(&shelf, &mut told);
+
+        if round.changed {
+            if let Some(library) = shelf.read() {
+                // Macros that were replaced or deleted let go of their files.
+                crate::assets::sweep(&library);
+            }
+            crate::library_changed(&app);
+        }
+        *TROUBLE.lock().unwrap() = round
+            .standing
+            .iter()
+            .filter_map(|(address, standing)| Some((*address, standing.clone().err()?)))
+            .collect();
+        if round.changed || round.standing != stood {
+            // Settings says who is in sync with whom, and may be open.
+            let _ = app.emit("tailnet-changed", ());
+        }
+        stood = round.standing;
+
+        std::thread::park_timeout(match round.poked {
+            true => FOLLOW_UP,
+            false => SYNC_EVERY,
+        });
+    }
+}
+
+/// What one round came to.
+#[derive(Default)]
+struct Round {
+    /// Whether the library here is different for it.
+    changed: bool,
+    /// Whether any machine was told to come and fetch.
+    poked: bool,
+    /// Where each machine that syncs now stands: holding the same as this
+    /// one, not yet, or why it could not be synced with.
+    standing: BTreeMap<Ipv4Addr, Result<bool, String>>,
+}
+
+fn round(shelf: &Shelf, told: &mut HashMap<SocketAddr, String>) -> Round {
+    let mut out = Round::default();
+    // The address first, which costs nothing to ask for: off the tailnet
+    // there is nobody to sync with, and no call to start a process to hear so.
+    let net = routed_address().and_then(|_| cli()).and_then(|cli| net_via(&cli));
+    let Some(net) = net else {
+        return out;
+    };
+    // Asked all at once, as the list in Settings is: one that is asleep
+    // should cost the round a wait, not a wait for each.
+    let asked: Vec<_> = net
+        .peers
+        .into_iter()
+        .filter(|peer| peer.online)
+        .map(|peer| {
+            let at = SocketAddr::from((peer.address, PORT));
+            (peer, at, std::thread::spawn(move || hello(at, PROBE).ok()))
+        })
+        .collect();
+    for (peer, at, answer) in asked {
+        // It takes both: a machine that has not asked to be kept in sync is
+        // left alone, though it would hand its library to anyone who asked.
+        let Some(theirs) = answer.join().ok().flatten().filter(|hello| hello.sync) else {
+            continue;
+        };
+        let met = match theirs.protocol == PROTOCOL {
+            true => meet(at, &theirs, shelf, told),
+            false => Err("it runs a different version of Reze — update both".to_string()),
+        };
+        if let Ok(met) = &met {
+            out.changed |= met.changed;
+            out.poked |= met.poked;
+        }
+        out.standing.insert(peer.address, met.map(|met| met.level));
+    }
+    out
+}
+
+/// What a round came to with one machine.
+#[derive(Debug)]
+struct Met {
+    changed: bool,
+    poked: bool,
+    /// Whether the two now hold the same thing.
+    level: bool,
+}
+
+/// One machine's turn in a round: take what it has that this one lacks, and
+/// if this one has something it lacks, say so.
+fn meet(
+    at: SocketAddr,
+    theirs: &Hello,
+    shelf: &Shelf,
+    told: &mut HashMap<SocketAddr, String>,
+) -> Result<Met, String> {
+    let unreadable = || "the library here could not be read".to_string();
+    let mut mine = shelf.revision().ok_or_else(unreadable)?;
+    let mut changed = false;
+    if mine != theirs.revision {
+        changed = pull(at, shelf)?;
+        mine = shelf.revision().ok_or_else(unreadable)?;
+    }
+    mend(at, shelf);
+
+    // Still different, having taken everything it has: then the difference is
+    // something of ours. It is told once for each state this library is in —
+    // a machine that cannot fetch is not helped by hearing it again, and two
+    // that could not agree would otherwise go on telling each other for ever.
+    let level = mine == theirs.revision;
+    let mut poked = false;
+    if !level && told.get(&at) != Some(&mine) && fetch(at, "/poke", PROBE, MAX_HEAD).is_ok() {
+        told.insert(at, mine);
+        poked = true;
+    }
+    Ok(Met {
+        changed,
+        poked,
+        level,
+    })
+}
+
+/// Make the library on `shelf` hold everything the one at `at` does, and say
+/// whether that changed it.
+///
+/// Files first, library last, as for an import: the library is only written
+/// once every file it newly names is here. But the files are fetched with
+/// nothing held, and the editor is free to save in the meantime — so what is
+/// written is worked out afresh, under the lock, from the library as it is at
+/// that moment, and if that turns out to need a file that has not been
+/// fetched yet, round it goes again.
+fn pull(at: SocketAddr, shelf: &Shelf) -> Result<bool, String> {
+    // Worded to follow "Not syncing with tenet:", which is where they are read.
+    let raw = fetch(at, "/library", STALL, MAX_LIBRARY)
+        .map_err(|e| format!("its library could not be fetched ({e})"))?;
+    let theirs: Library = serde_json::from_slice(&raw)
+        .map_err(|e| format!("its library could not be read ({e})"))?;
+    crate::merge::check(&theirs)
+        .map_err(|_| "it runs a newer Reze than this one — update this one")?;
+
+    // Files its library names and its disk does not have. Unlike an import,
+    // the macro keeps the reference: taking it off would be a difference
+    // between the two libraries that no amount of syncing could settle.
+    let mut absent = HashSet::new();
+    for _ in 0..ATTEMPTS {
+        let wanted: Vec<Attachment> = {
+            let _writing = crate::store::lock();
+            let mine = shelf.read().ok_or("the library here could not be read")?;
+            let out = crate::sync::reconcile(&mine, &theirs, crate::sync::now());
+            if !out.changed {
+                return Ok(false);
+            }
+            let wanted: Vec<Attachment> = out
+                .incoming
+                .into_iter()
+                .filter(|a| !absent.contains(&a.file) && !shelf.has(a))
+                .collect();
+            if wanted.is_empty() {
+                shelf.write(&out.library)?;
+                return Ok(true);
+            }
+            wanted
+        };
+        std::fs::create_dir_all(&shelf.assets).map_err(|e| e.to_string())?;
+        for attachment in wanted {
+            let dest = crate::assets::bare_name(&shelf.assets, &attachment.file)?;
+            match download(at, &format!("/assets/{}", encode(&attachment.file)), &dest) {
+                Ok(()) => {}
+                Err(Failed::Status(404)) => {
+                    absent.insert(attachment.file);
+                }
+                Err(e) => return Err(format!("{} could not be fetched ({e})", attachment.name)),
+            }
+        }
+    }
+    Err("the library here kept changing while it was being synced".into())
+}
+
+/// Fetch from `at` any file the library on `shelf` names and does not have.
+///
+/// Usually there is none. When there is — a file deleted by hand, or swept
+/// away in the minute a slow sync took — the machine it came from, or any
+/// other that has since fetched it, is the place to get it back from. Tried
+/// every round and with every machine, since which of them has it is not
+/// known; one that does not says so in a few bytes.
+fn mend(at: SocketAddr, shelf: &Shelf) {
+    let Some(library) = shelf.read() else {
+        return;
+    };
+    let lost = library
+        .macros
+        .iter()
+        .flat_map(|m| &m.attachments)
+        .filter(|a| a.path.is_none() && !shelf.has(a));
+    for attachment in lost {
+        let Ok(dest) = crate::assets::bare_name(&shelf.assets, &attachment.file) else {
+            continue;
+        };
+        let path = format!("/assets/{}", encode(&attachment.file));
+        // Not having it is an answer; not answering is the machine gone, and
+        // every further file would wait on it just as long.
+        if let Err(Failed::Network(_)) = download(at, &path, &dest) {
+            break;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1192,6 +1527,13 @@ mod tests {
         };
         let hello: Hello = serde_json::from_slice(&raw).unwrap();
         assert_eq!((hello.protocol, hello.macros, hello.attachments), (PROTOCOL, 3, 2));
+        // Sync is asked for, never assumed; and what a build from before it
+        // existed says about itself still reads, as a machine that does not.
+        assert!(!hello.sync);
+        assert_eq!(hello.revision, shelf.revision().unwrap());
+        let old: Hello = serde_json::from_str(r#"{"protocol":1,"os":"linux","macros":3}"#).unwrap();
+        assert!(!old.sync && old.revision.is_empty());
+        assert_eq!(code_of(&answer("/poke", &shelf)), 200);
 
         let Reply::Json(raw) = answer("/library", &shelf) else {
             panic!("no library");
@@ -1264,6 +1606,8 @@ mod tests {
                 os: "linux".into(),
                 macros: 0,
                 attachments: 0,
+                sync: false,
+                revision: String::new(),
             },
             library: shelf.read().unwrap(),
             at,
@@ -1289,7 +1633,8 @@ mod tests {
         let here = root.join("here");
 
         let mut merged = crate::merge::merge(&empty(), &source.library, Default::default());
-        let got = source.collect(&mut merged, &here).unwrap();
+        let got = source.collect(&merged.incoming, &here).unwrap();
+        got.strip(&mut merged.library);
 
         assert_eq!(got.fetched, 1);
         assert_eq!(std::fs::read(here.join("named.png")).unwrap(), b"the picture");
@@ -1304,7 +1649,7 @@ mod tests {
         // has stopped answering, so this passing means nothing was asked.
         let mut again = crate::merge::merge(&empty(), &source.library, Default::default());
         again.incoming.retain(|a| a.file == "named.png");
-        assert_eq!(source.collect(&mut again, &here).unwrap().fetched, 0);
+        assert_eq!(source.collect(&again.incoming, &here).unwrap().fetched, 0);
         std::fs::remove_dir_all(root).ok();
     }
 
@@ -1315,8 +1660,8 @@ mod tests {
         let dead = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap().local_addr().unwrap();
         let source = theirs(&shelf, dead);
 
-        let mut merged = crate::merge::merge(&empty(), &source.library, Default::default());
-        let failed = source.collect(&mut merged, &root.join("here")).unwrap_err();
+        let merged = crate::merge::merge(&empty(), &source.library, Default::default());
+        let failed = source.collect(&merged.incoming, &root.join("here")).unwrap_err();
 
         assert!(failed.contains("Nothing here was changed"), "{failed}");
         std::fs::remove_dir_all(root).ok();
@@ -1361,5 +1706,164 @@ mod tests {
             );
         });
         assert!(matches!(hello(at, Duration::from_secs(2)), Err(Failed::Network(_))));
+    }
+
+    /// A machine with sync on: a scratch library holding `macros` and
+    /// remembering `deleted`, each written as it would be in the file.
+    fn machine(root: &Path, name: &str, macros: &str, deleted: &str) -> Shelf {
+        let assets = root.join(name).join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        let library = root.join(name).join("macros.json");
+        std::fs::write(
+            &library,
+            format!(
+                r#"{{"version":1,
+                    "settings":{{"hotkey":"A","pasteMode":"paste","restoreClipboard":true,"sync":true}},
+                    "macros":[{macros}],"deleted":{{{deleted}}}}}"#
+            ),
+        )
+        .unwrap();
+        Shelf { library, assets }
+    }
+
+    fn scratch() -> PathBuf {
+        std::env::temp_dir().join(format!("reze-sync-{}", uuid::Uuid::new_v4()))
+    }
+
+    const WITH_A_FILE: &str = r#""attachments":[{"id":"f","file":"a.png","name":"A.png",
+        "kind":"image","mime":"image/png","bytes":5}]"#;
+
+    #[test]
+    fn two_machines_that_sync_end_up_holding_the_same_thing() {
+        let root = scratch();
+        // Real times: a deletion from 1970 would be long forgotten.
+        let t = crate::sync::now() - 10_000;
+        let a = machine(
+            &root,
+            "a",
+            &format!(
+                r#"{{"id":"1","name":"only on a","body":"x","updatedAt":{t},{WITH_A_FILE}}},
+                   {{"id":"2","name":"on both","body":"edited first","updatedAt":{t}}},
+                   {{"id":"3","name":"deleted on b","body":"y","updatedAt":{t}}}"#
+            ),
+            "",
+        );
+        std::fs::write(a.assets.join("a.png"), b"a png").unwrap();
+        let b = machine(
+            &root,
+            "b",
+            &format!(
+                r#"{{"id":"4","name":"only on b","body":"z","updatedAt":{}}},
+                   {{"id":"2","name":"on both","body":"edited last","updatedAt":{}}}"#,
+                t + 100,
+                t + 200
+            ),
+            &format!(r#""3":{}"#, t + 300),
+        );
+
+        // B asks A: for its library, then for the one file that names.
+        assert_eq!(pull(serving(a.clone(), true, 2), &b), Ok(true));
+        assert_eq!(std::fs::read(b.assets.join("a.png")).unwrap(), b"a png");
+        // A asks B, which has everything of A's by now. What B added, B's
+        // later edit and B's deletion are the news.
+        assert_eq!(pull(serving(b.clone(), true, 1), &a), Ok(true));
+
+        for shelf in [&a, &b] {
+            let library = shelf.read().unwrap();
+            let mut holds: Vec<_> =
+                library.macros.iter().map(|m| (m.name.as_str(), m.body.as_str())).collect();
+            holds.sort();
+            assert_eq!(
+                holds,
+                [("on both", "edited last"), ("only on a", "x"), ("only on b", "z")]
+            );
+        }
+        assert_eq!(a.revision(), b.revision());
+        // And having agreed, neither finds anything to do.
+        assert_eq!(pull(serving(a.clone(), true, 1), &b), Ok(false));
+        assert_eq!(pull(serving(b.clone(), true, 1), &a), Ok(false));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_machine_with_something_new_says_so_once() {
+        let root = scratch();
+        let t = crate::sync::now();
+        let a = machine(
+            &root,
+            "a",
+            &format!(r#"{{"id":"1","name":"new here","body":"x","updatedAt":{t}}}"#),
+            "",
+        );
+        let b = machine(&root, "b", "", "");
+        let hello = |shelf: &Shelf| -> Hello {
+            let Reply::Json(raw) = answer("/reze", shelf) else {
+                panic!("no hello");
+            };
+            serde_json::from_slice(&raw).unwrap()
+        };
+        assert!(hello(&b).sync);
+        let mut told = HashMap::new();
+
+        // More connections than it needs, so that a second telling would be
+        // answered if it were sent.
+        let at = serving(b.clone(), true, 4);
+        let met = meet(at, &hello(&b), &a, &mut told).unwrap();
+        assert!(!met.changed && met.poked && !met.level, "{met:?}");
+        let met = meet(at, &hello(&b), &a, &mut told).unwrap();
+        assert!(!met.poked, "said the same thing twice");
+
+        // B comes and fetches, and then there is nothing to say either way.
+        let at = serving(a.clone(), true, 2);
+        let met = meet(at, &hello(&a), &b, &mut told).unwrap();
+        assert!(met.changed && met.level && !met.poked, "{met:?}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_sync_that_cannot_get_a_file_changes_nothing() {
+        let root = scratch();
+        let t = crate::sync::now();
+        let a = machine(
+            &root,
+            "a",
+            &format!(r#"{{"id":"1","name":"with a file","body":"x","updatedAt":{t},{WITH_A_FILE}}}"#),
+            "",
+        );
+        std::fs::write(a.assets.join("a.png"), b"a png").unwrap();
+        let b = machine(&root, "b", "", "");
+        let before = std::fs::read(&b.library).unwrap();
+
+        // It hands over its library and is gone before the file is asked for.
+        let failed = pull(serving(a.clone(), true, 1), &b).unwrap_err();
+
+        assert!(failed.contains("A.png"), "{failed}");
+        assert_eq!(std::fs::read(&b.library).unwrap(), before);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_file_one_machine_lost_comes_back_from_another() {
+        let root = scratch();
+        let t = crate::sync::now();
+        // A names a file it does not have.
+        let a = machine(
+            &root,
+            "a",
+            &format!(r#"{{"id":"1","name":"with a file","body":"x","updatedAt":{t},{WITH_A_FILE}}}"#),
+            "",
+        );
+        let b = machine(&root, "b", "", "");
+
+        // B takes the macro all the same, reference and all: a B without it
+        // would differ from A for good.
+        assert_eq!(pull(serving(a.clone(), true, 2), &b), Ok(true));
+        assert_eq!(a.revision(), b.revision());
+
+        // And should B have the file, A gets it back.
+        std::fs::write(b.assets.join("a.png"), b"found").unwrap();
+        mend(serving(b.clone(), true, 1), &a);
+        assert_eq!(std::fs::read(a.assets.join("a.png")).unwrap(), b"found");
+        std::fs::remove_dir_all(root).ok();
     }
 }

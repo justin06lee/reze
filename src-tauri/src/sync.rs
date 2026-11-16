@@ -24,12 +24,10 @@
 //! None of it touches the network or the disk. [`crate::tailnet`] carries the
 //! libraries about; this only decides what two of them make.
 
-// TODO(sync): `reconcile` has no caller until the sync loop exists; drop this then.
-#![allow(dead_code)]
-
 use crate::assets::Attachment;
 use crate::merge::{alike, counterparts, portable};
-use crate::store::{Library, Macro};
+use crate::store::{Library, Macro, Settings};
+use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// How long a deletion is remembered.
@@ -57,13 +55,22 @@ pub fn now() -> u64 {
 ///
 /// Done on every save whether or not sync is on, so that switching it on
 /// later finds a library that already knows its own history.
+///
+/// `now` is this machine's clock, and no two machines' clocks agree. So a
+/// change is dated `now` or just after whatever it changes, whichever is
+/// later: an edit made here is an edit *of* the version that was here, and
+/// has to outrank it even when that version came from a machine whose clock
+/// runs ahead.
 pub fn stamp(before: &Library, after: &mut Library, now: u64) {
     let was: HashMap<&str, &Macro> = before.macros.iter().map(|m| (m.id.as_str(), m)).collect();
     // Folder macros are rebuilt from their folder and never saved or synced.
     for m in after.macros.iter_mut().filter(|m| m.folder.is_none()) {
-        m.updated_at = match was.get(m.id.as_str()) {
-            Some(old) if alike(old, m) => old.updated_at,
-            _ => now,
+        m.updated_at = match (was.get(m.id.as_str()), before.deleted.get(&m.id)) {
+            (Some(old), _) if alike(old, m) => old.updated_at,
+            (Some(old), _) => now.max(old.updated_at.saturating_add(1)),
+            // Back after being deleted, which is a change to the deletion.
+            (None, Some(deleted)) => now.max(deleted.saturating_add(1)),
+            (None, None) => now,
         };
     }
 
@@ -75,7 +82,7 @@ pub fn stamp(before: &Library, after: &mut Library, now: u64) {
     }
     for m in before.macros.iter().filter(|m| m.folder.is_none()) {
         if !here.contains(m.id.as_str()) {
-            deleted.insert(m.id.clone(), now);
+            deleted.insert(m.id.clone(), now.max(m.updated_at));
         }
     }
     // Something that is back is not deleted: it was stamped `now` above, which
@@ -86,6 +93,71 @@ pub fn stamp(before: &Library, after: &mut Library, now: u64) {
 
 fn fresh(at: u64, now: u64) -> bool {
     at.saturating_add(REMEMBER_DELETIONS) > now
+}
+
+/// What the editor did since it last saved: these macros added or edited,
+/// those deleted, and the settings if one of them was changed.
+///
+/// Not the library as the window has it. A window only knows what it was last
+/// shown, and by the time it saves, another machine may have added a macro it
+/// never saw — which, in a whole library sent back, would look exactly like a
+/// macro the user had just deleted, and be deleted everywhere. Saying what was
+/// *done* leaves nothing to infer.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Changes {
+    #[serde(default)]
+    pub macros: Vec<Macro>,
+    #[serde(default)]
+    pub removed: Vec<String>,
+    #[serde(default)]
+    pub settings: Option<Settings>,
+}
+
+/// The library on disk, with what the editor did done to it and dated.
+///
+/// Everything the editor did not touch stays as the disk has it, whatever the
+/// window believed about it.
+pub fn apply(before: &Library, changes: Changes, now: u64) -> Library {
+    let Changes {
+        macros,
+        removed,
+        settings,
+    } = changes;
+    let mut after = before.clone();
+    after.macros.retain(|m| !removed.contains(&m.id));
+
+    let mut added = Vec::new();
+    // Folder macros are rebuilt from the folder on every scan. Writing one
+    // here would persist a snapshot that goes stale the moment a file is
+    // renamed, and that the next scan would then duplicate.
+    for mut edited in macros.into_iter().filter(|m| m.folder.is_none()) {
+        if removed.contains(&edited.id) {
+            continue;
+        }
+        match after.macros.iter_mut().find(|m| m.id == edited.id) {
+            Some(known) => {
+                // The palette counts uses behind the editor's back.
+                edited.usage_count = known.usage_count;
+                *known = edited;
+            }
+            None => added.push(edited),
+        }
+    }
+    // On top, which is where the editor shows a macro it has just made.
+    added.append(&mut after.macros);
+    after.macros = added;
+
+    if let Some(settings) = settings {
+        after.settings = Settings {
+            // Set through a command of their own, and so never by a window
+            // that may not have heard of the latest list.
+            folders: before.settings.folders.clone(),
+            ..settings
+        };
+    }
+    stamp(before, &mut after, now);
+    after
 }
 
 /// What a macro says, as a number that is the same on every machine and in
@@ -107,6 +179,43 @@ fn fingerprint(m: &Macro) -> u64 {
     feed("");
     m.attachments.iter().for_each(|a| feed(&a.file));
     hash
+}
+
+/// What a library holds, as a few characters that are the same on every
+/// machine holding the same thing — and, near enough to always, different on
+/// any holding something else.
+///
+/// Two machines compare these before anything is fetched, which is what makes
+/// asking every minute cheap. Everything [`reconcile`] goes by is in it and
+/// nothing else is: not the order the macros are in, not the use counts, not
+/// the settings.
+pub fn revision(library: &Library) -> String {
+    let mut macros: Vec<(&str, u64, u64)> = library
+        .macros
+        .iter()
+        .filter(|m| m.folder.is_none())
+        .map(|m| (m.id.as_str(), m.updated_at, fingerprint(m)))
+        .collect();
+    macros.sort_unstable();
+
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for byte in bytes.iter().chain(&[0xff]) {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    for (id, at, says) in macros {
+        feed(id.as_bytes());
+        feed(&at.to_be_bytes());
+        feed(&says.to_be_bytes());
+    }
+    feed(b"deleted");
+    for (id, at) in &library.deleted {
+        feed(id.as_bytes());
+        feed(&at.to_be_bytes());
+    }
+    format!("{hash:016x}")
 }
 
 /// Where a version of a macro stands against another version of it. The
@@ -263,6 +372,7 @@ mod tests {
         let at_b = reconcile(b, a, NOW).library;
         assert_eq!(contents(&at_a), contents(&at_b), "the two machines disagree");
         assert_eq!(at_a.deleted, at_b.deleted, "the two machines disagree on deletions");
+        assert_eq!(revision(&at_a), revision(&at_b), "agreeing machines do not look it");
         assert!(!reconcile(&at_a, &at_b, NOW).changed, "agreeing machines kept changing");
         assert!(!reconcile(&at_b, &at_a, NOW).changed, "agreeing machines kept changing");
         at_a
@@ -394,6 +504,30 @@ mod tests {
     }
 
     #[test]
+    fn a_change_outranks_what_it_changed_whatever_the_clocks_say() {
+        // Both arrived from a machine whose clock is an hour fast.
+        let ahead = NOW + 3_600_000;
+        let mut before = lib(vec![
+            mac("edited", "edited", "old", ahead),
+            mac("removed", "removed", "x", ahead),
+        ]);
+        before.deleted.insert("restored".into(), ahead);
+        let mut after = lib(vec![
+            mac("edited", "edited", "new", ahead),
+            mac("restored", "restored", "y", 0),
+        ]);
+
+        stamp(&before, &mut after, NOW);
+
+        // Each of them, met by the library it was made from, wins.
+        let settled = settle(&after, &before);
+        let bodies: Vec<_> = settled.macros.iter().map(|m| m.body.as_str()).collect();
+        assert!(bodies.contains(&"new"), "an edit lost to what it edited");
+        assert!(bodies.contains(&"y"), "a macro put back stayed deleted");
+        assert!(!bodies.contains(&"x"), "a deleted macro came back");
+    }
+
+    #[test]
     fn a_macro_that_comes_back_is_no_longer_deleted() {
         let mut before = lib(vec![]);
         before.deleted.insert("back".into(), NOW - 1000);
@@ -406,5 +540,125 @@ mod tests {
         let mut elsewhere = lib(vec![]);
         elsewhere.deleted.insert("back".into(), NOW - 1000);
         assert_eq!(settle(&after, &elsewhere).macros.len(), 1);
+    }
+
+    #[test]
+    fn reads_a_save_the_way_the_editor_sends_it() {
+        // Word for word what the window puts on the wire: see `Changes` in
+        // types.ts. An edit and a deletion, then a setting on its own.
+        let edit = r#"{"macros":[{"id":"1","name":"first","description":"","tags":[],
+            "body":"one, edited","attachments":[],"usageCount":0,"updatedAt":100}],
+            "removed":["3"],"settings":null}"#;
+        let changes: Changes = serde_json::from_str(edit).unwrap();
+        assert_eq!(changes.macros[0].body, "one, edited");
+        assert_eq!(changes.removed, ["3"]);
+        assert!(changes.settings.is_none());
+
+        let setting = r#"{"macros":[],"removed":[],"settings":{
+            "hotkey":"CmdOrCtrl+Shift+Space","expandHotkey":"Alt+Space","folders":[],
+            "trackTyping":true,"pasteMode":"paste","restoreClipboard":true,
+            "clipboardHotkey":"CmdOrCtrl+Shift+V","clipboardHistory":true,
+            "clipboardLimit":200,"shareOverTailscale":true,"sync":true}}"#;
+        let changes: Changes = serde_json::from_str(setting).unwrap();
+        assert!(changes.settings.unwrap().syncs());
+    }
+
+    #[test]
+    fn a_save_changes_only_what_the_editor_touched() {
+        // The disk has a macro the window never saw: it arrived from another
+        // machine after the window was last shown the library.
+        let mut used = mac("edited", "edited", "old", 100);
+        used.usage_count = 7;
+        let disk = lib(vec![
+            mac("arrived", "from elsewhere", "x", 100),
+            used,
+            mac("removed", "removed", "y", 100),
+        ]);
+
+        let after = apply(
+            &disk,
+            Changes {
+                macros: vec![mac("edited", "edited", "new", 0), mac("made", "made here", "z", 0)],
+                removed: vec!["removed".into()],
+                settings: None,
+            },
+            NOW,
+        );
+
+        let ids: Vec<&str> = after.macros.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["made", "arrived", "edited"], "a new macro goes on top");
+        let of = |id: &str| after.macros.iter().find(|m| m.id == id).unwrap();
+        assert_eq!(of("arrived").updated_at, 100, "a macro nobody touched was dated");
+        assert_eq!((of("edited").body.as_str(), of("edited").updated_at), ("new", NOW));
+        assert_eq!(of("edited").usage_count, 7, "the count came from the window");
+        assert_eq!(of("made").updated_at, NOW);
+        assert_eq!(after.deleted.keys().collect::<Vec<_>>(), ["removed"]);
+    }
+
+    #[test]
+    fn a_save_cannot_write_a_folder_macro_or_move_the_folders() {
+        let mut disk = lib(vec![]);
+        disk.settings.folders = vec!["/as/set".into()];
+        let mut derived = mac("folder:/as/set/a.png", "a", "", 0);
+        derived.folder = Some("/as/set".into());
+        let mut stale = disk.settings.clone();
+        stale.folders = vec!["/from/before".into()];
+        stale.paste_mode = "copy".into();
+
+        let after = apply(
+            &disk,
+            Changes {
+                macros: vec![derived],
+                removed: vec![],
+                settings: Some(stale),
+            },
+            NOW,
+        );
+
+        assert!(after.macros.is_empty());
+        assert_eq!(after.settings.paste_mode, "copy");
+        assert_eq!(after.settings.folders, ["/as/set"]);
+    }
+
+    #[test]
+    fn deleting_something_already_gone_leaves_no_trace() {
+        // Made and deleted between two saves, or deleted on another machine
+        // first: either way there is nothing here to remember deleting.
+        let disk = lib(vec![mac("kept", "kept", "x", 100)]);
+
+        let after = apply(
+            &disk,
+            Changes {
+                removed: vec!["never-saved".into()],
+                ..Changes::default()
+            },
+            NOW,
+        );
+
+        assert!(after.deleted.is_empty());
+        assert_eq!(revision(&after), revision(&disk));
+    }
+
+    #[test]
+    fn the_revision_is_what_the_library_holds_and_nothing_else() {
+        let a = lib(vec![mac("1", "one", "x", 100), mac("2", "two", "y", 200)]);
+
+        // Order, use counts and settings are each machine's own.
+        let mut same = lib(vec![mac("2", "two", "y", 200), mac("1", "one", "x", 100)]);
+        same.macros[0].usage_count = 12;
+        same.settings.paste_mode = "copy".into();
+        assert_eq!(revision(&a), revision(&same));
+
+        let mut edited = a.clone();
+        edited.macros[0].body = "changed".into();
+        assert_ne!(revision(&a), revision(&edited));
+
+        let mut redated = a.clone();
+        redated.macros[0].updated_at = 101;
+        assert_ne!(revision(&a), revision(&redated));
+
+        let mut deleted = a.clone();
+        deleted.deleted.insert("3".into(), 300);
+        assert_ne!(revision(&a), revision(&deleted));
     }
 }

@@ -166,7 +166,7 @@ fn pair(mine: &[Macro], theirs: &[Macro]) -> Vec<Fate> {
 pub fn check(theirs: &Library) -> Result<(), String> {
     if theirs.version > FORMAT_VERSION {
         return Err(
-            "That machine runs a newer Reze than this one. Update this one, then import.".into(),
+            "That machine runs a newer Reze than this one. Update this one first.".into(),
         );
     }
     Ok(())

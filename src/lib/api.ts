@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import type {
   Attachment,
+  Changes,
   ClipEntry,
   Grabbed,
   GrabTools,
@@ -13,7 +14,8 @@ import type {
 } from "./types";
 
 export const getLibrary = () => invoke<Library>("get_library");
-export const saveLibrary = (library: Library) => invoke<void>("save_library", { library });
+/** Save what the editor did. The library that results comes back as an event. */
+export const saveLibrary = (changes: Changes) => invoke<void>("save_library", { changes });
 export const bumpUsage = (id: string) => invoke<void>("bump_usage", { id });
 
 export const readClipboard = () => invoke<string>("read_clipboard");

@@ -27,8 +27,79 @@ import "./editor.css";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
+/**
+ * What has been done in the window and has not reached the disk: which macros
+ * were added or edited, which deleted, and whether a setting changed.
+ *
+ * Ids, not macros. What an edited macro now says is read off the library the
+ * window is showing at the moment it is saved.
+ */
+type Unsaved = { touched: Set<string>; removed: Set<string>; settings: boolean };
+
+const nothingUnsaved = (): Unsaved => ({ touched: new Set(), removed: new Set(), settings: false });
+
+/** Add to `unsaved` whatever turns `before` into `after`. */
+function note(unsaved: Unsaved, before: Library, after: Library) {
+  const was = new Map(before.macros.map((m) => [m.id, m]));
+  for (const m of after.macros) {
+    // Every edit makes a new object for the macro it edits and leaves the
+    // rest as they were, so the same object is the same macro, untouched.
+    if (!m.folder && was.get(m.id) !== m) {
+      unsaved.touched.add(m.id);
+      unsaved.removed.delete(m.id);
+    }
+    was.delete(m.id);
+  }
+  for (const m of was.values()) {
+    if (m.folder) continue;
+    unsaved.removed.add(m.id);
+    unsaved.touched.delete(m.id);
+  }
+  if (after.settings !== before.settings) unsaved.settings = true;
+}
+
+/**
+ * A library arriving from disk, with what the window has done and not yet
+ * saved laid back over it.
+ *
+ * Without this, a macro synced in from another machine mid-sentence would
+ * redraw the field being typed in as it was at the last save, and the next
+ * keystroke would be typed into that.
+ */
+function overlay(incoming: Library, shown: Library, unsaved: Unsaved[]): Library {
+  const touched = (id: string) => unsaved.some((u) => u.touched.has(id));
+  const removed = (id: string) => unsaved.some((u) => u.removed.has(id));
+  const ours = new Map(shown.macros.map((m) => [m.id, m]));
+  const theirs = new Set(incoming.macros.map((m) => m.id));
+  return {
+    ...incoming,
+    settings: unsaved.some((u) => u.settings)
+      ? // The folder list is set by a command of its own, not saved from here.
+        { ...shown.settings, folders: incoming.settings.folders }
+      : incoming.settings,
+    macros: [
+      // Made here and not saved yet, so the disk has not heard of them.
+      ...shown.macros.filter((m) => touched(m.id) && !removed(m.id) && !theirs.has(m.id)),
+      ...incoming.macros
+        .filter((m) => !removed(m.id))
+        .map((m) => (touched(m.id) ? (ours.get(m.id) ?? m) : m)),
+    ],
+  };
+}
+
 export default function Editor() {
-  const { library, setLibrary, error, setError } = useLibrary();
+  // The library as this window has it, which runs ahead of the one on disk by
+  // whatever is in `unsaved` — and, for the moment a save takes, `saving`.
+  const shown = useRef<Library | null>(null);
+  const unsaved = useRef(nothingUnsaved());
+  const saving = useRef<Unsaved[]>([]);
+  const arriving = useCallback((incoming: Library) => {
+    const ahead = [...saving.current, unsaved.current];
+    shown.current = shown.current ? overlay(incoming, shown.current, ahead) : incoming;
+    return shown.current;
+  }, []);
+
+  const { library, setLibrary, error, setError } = useLibrary(arriving);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("idle");
@@ -41,8 +112,6 @@ export default function Editor() {
   const [notice, setNotice] = useState<string | null>(null);
 
   const saveTimer = useRef<number | null>(null);
-  // What the pending save is going to write, so it can be written early.
-  const unsaved = useRef<Library | null>(null);
   const armTimer = useRef<number | null>(null);
 
   const macros = library?.macros ?? [];
@@ -64,45 +133,63 @@ export default function Editor() {
     return () => window.removeEventListener("focus", check);
   }, []);
 
-  const write = useCallback(
-    (next: Library) =>
-      api
-        .saveLibrary(next)
-        .then(() => setSaveState("saved"))
-        .catch((e) => {
-          setSaveState("error");
-          setError(String(e));
-        }),
-    [setError],
-  );
+  /** Send what has been done since the last save, and only that. */
+  const write = useCallback(async () => {
+    const library = shown.current;
+    const changes = unsaved.current;
+    const any = changes.touched.size > 0 || changes.removed.size > 0 || changes.settings;
+    if (!library || !any) return;
+    unsaved.current = nothingUnsaved();
+    saving.current.push(changes);
+    try {
+      await api.saveLibrary({
+        macros: library.macros.filter((m) => changes.touched.has(m.id)),
+        removed: [...changes.removed],
+        settings: changes.settings ? library.settings : null,
+      });
+      const more = unsaved.current;
+      if (more.touched.size + more.removed.size === 0 && !more.settings) setSaveState("saved");
+    } catch (e) {
+      // Still unsaved, then: back with whatever has been done since, which
+      // has the last word on anything both mention.
+      const since = unsaved.current;
+      for (const id of changes.touched) if (!since.removed.has(id)) since.touched.add(id);
+      for (const id of changes.removed) if (!since.touched.has(id)) since.removed.add(id);
+      since.settings ||= changes.settings;
+      setSaveState("error");
+      setError(String(e));
+    } finally {
+      saving.current = saving.current.filter((sent) => sent !== changes);
+    }
+  }, [setError]);
 
   /** Apply a change immediately and debounce the write to disk. */
   const update = useCallback(
     (next: Library) => {
+      // Against the library this render drew, which is the one `next` was
+      // made from — not `shown`, which a library arriving since may have moved
+      // on. A macro that had just come in would otherwise be missing from
+      // `next` and noted as deleted.
+      if (library) note(unsaved.current, library, next);
+      shown.current = next;
       setLibrary(next);
       setSaveState("saving");
-      unsaved.current = next;
       if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = window.setTimeout(() => {
-        unsaved.current = null;
-        write(next);
-      }, 400);
+      saveTimer.current = window.setTimeout(write, 400);
     },
-    [setLibrary, write],
+    [library, setLibrary, write],
   );
 
   /**
    * Write a pending change now instead of when its timer fires.
    *
    * For anything that rewrites the library behind the editor's back — an
-   * import, or undoing one. A save still waiting out its debounce would land
-   * afterwards and quietly put back the library from before.
+   * import, or undoing one — and would otherwise be working from a library
+   * that does not have the last thing typed in it.
    */
   const flush = useCallback(async () => {
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    const next = unsaved.current;
-    unsaved.current = null;
-    if (next) await write(next);
+    await write();
   }, [write]);
 
   const patchMacro = useCallback(
@@ -1215,26 +1302,39 @@ function some(names: string[], most = 4): string {
   return `${names.slice(0, most).join(", ")} and ${names.length - most} more`;
 }
 
-/** What a machine has to say for itself in the list. */
-function says(device: Device): string {
+/**
+ * What a machine has to say for itself in the list. `revision` is what this
+ * machine's library holds, when this machine syncs: with it, the line also
+ * says where the two stand.
+ */
+function says(device: Device, revision: string | null): string {
   if (!device.online) return "offline";
   if (!device.reze) return "Reze is not answering";
   const { macros, attachments } = device.reze;
-  return attachments > 0
-    ? `${count(macros, "macro")} · ${count(attachments, "attachment")}`
-    : count(macros, "macro");
+  const has =
+    attachments > 0
+      ? `${count(macros, "macro")} · ${count(attachments, "attachment")}`
+      : count(macros, "macro");
+  if (revision === null) return has;
+  // Also what a Reze from before sync existed comes out as, which is fair:
+  // it is not syncing, and updating it is how to switch it on.
+  if (!device.reze.sync) return `${has} · sync is off there`;
+  if (device.trouble) return `${has} · not syncing`;
+  return `${has} · ${device.reze.revision === revision ? "in sync" : "syncing…"}`;
 }
 
 /**
- * Your other machines, and importing from one.
+ * Your other machines: keeping them the same, and importing from one.
  *
  * Tailscale owns the answer to "which machines are mine", so like the login
  * item it is read back rather than remembered: on opening, whenever the window
- * comes forward, and whenever the backend notices the tailnet come or go.
+ * comes forward, and whenever the backend notices the tailnet come or go — or
+ * a sync change where a machine stands.
  *
  * Importing is never one click. Choosing a machine fetches its library and
  * says what would happen — which macros are new, which would be overwritten,
  * which only this machine has — and the import is the button under that.
+ * Sync is the opposite on purpose: one tick, and from then on nobody is asked.
  */
 function DevicesSection({
   library,
@@ -1337,6 +1437,8 @@ function DevicesSection({
 
   const s = library.settings;
   const running = net?.state === "running" ? net : null;
+  // Sync is fetching both ways, so it needs this machine to be answering.
+  const syncing = s.sync && s.shareOverTailscale;
 
   // With nothing only here, the two ways of importing come to the same macros.
   const choice = preview !== null && preview.onlyHere.length > 0;
@@ -1360,9 +1462,9 @@ function DevicesSection({
     <section>
       <h2>Other devices</h2>
       <p>
-        Copy the library from another of your machines — its macros, their attachments and, if
-        you want them, its settings. It travels over Tailscale, between machines signed in as
-        you, with Reze running on both.
+        Keep one library on all your machines, or copy it across once — macros and their
+        attachments, and for a copy the settings too if you want them. It travels over
+        Tailscale, between machines signed in as you, with Reze running on both.
       </p>
 
       {net === null ? (
@@ -1396,7 +1498,9 @@ function DevicesSection({
                   <span className="e-device-dot" data-on={device.reze ? "true" : "false"} aria-hidden />
                   <code>{device.name}</code>
                   <em>{osName(device.os)}</em>
-                  <span className="e-device-says">{says(device)}</span>
+                  <span className="e-device-says">
+                    {says(device, syncing ? net.revision : null)}
+                  </span>
                   {device.reze && from?.address !== device.address && (
                     <button onClick={() => choose(device)} disabled={busy}>
                       Import…
@@ -1450,6 +1554,7 @@ function DevicesSection({
                                 <em>
                                   Removes the {count(preview.onlyHere.length, "macro")} only this
                                   machine has, leaving a copy of {device.name}’s.
+                                  {syncing && " With sync on, they go from your other machines too."}
                                 </em>
                               </span>
                             </label>
@@ -1513,6 +1618,12 @@ function DevicesSection({
                     )}
                   </div>
                 )}
+
+                {syncing && device.reze?.sync && device.trouble && (
+                  <p className="e-warn">
+                    Not syncing with {device.name}: {device.trouble}.
+                  </p>
+                )}
               </li>
             ))}
             {net.devices.length === 0 && (
@@ -1530,7 +1641,9 @@ function DevicesSection({
             Imported from <code>{done.from}</code>
             {did.length > 0 ? ` — ${did.join(", ")}.` : " — nothing needed changing."}
           </span>
-          <button onClick={undo}>Undo</button>
+          {/* Not while syncing: what an import brought is on the other machines
+              by now, and putting this one back would only have them return it. */}
+          {!syncing && <button onClick={undo}>Undo</button>}
         </div>
       )}
       {done && done.missing.length > 0 && (
@@ -1551,9 +1664,44 @@ function DevicesSection({
       <label className="e-check" style={{ marginTop: 16 }}>
         <input
           type="checkbox"
+          checked={syncing}
+          onChange={(e) => {
+            const on = e.target.checked;
+            // The offer to undo an import does not outlive this: from here on
+            // the newest thing set aside is the library as sync found it.
+            if (on) setDone(null);
+            update({
+              ...library,
+              settings: { ...s, sync: on, shareOverTailscale: on || s.shareOverTailscale },
+            });
+          }}
+        />
+        <span>
+          Keep my devices in sync
+          <em>
+            A macro added, changed or deleted on one machine is added, changed or deleted on
+            every other that has this ticked too — within seconds while both are awake, and
+            when they next meet otherwise. Where two machines changed the same macro, the later
+            change wins. Macros and their attachments only: settings, watched folders, the
+            clipboard history and use counts stay each machine’s own. Ticking it sets the
+            library aside in <code>~/.reze/backups</code> first.
+          </em>
+        </span>
+      </label>
+
+      <label className="e-check">
+        <input
+          type="checkbox"
           checked={s.shareOverTailscale}
           onChange={(e) =>
-            update({ ...library, settings: { ...s, shareOverTailscale: e.target.checked } })
+            update({
+              ...library,
+              settings: {
+                ...s,
+                shareOverTailscale: e.target.checked,
+                sync: e.target.checked && s.sync,
+              },
+            })
           }
         />
         <span>
@@ -1563,7 +1711,7 @@ function DevicesSection({
             {running ? ` (${running.address}, port ${running.port})` : ""} and nowhere else, and
             answers only devices signed in to Tailscale as you. It hands over the macros you
             wrote and their attachments — never the clipboard history, and nothing from watched
-            folders. Off, nothing listens at all.
+            folders. Off, nothing listens at all, and so nothing syncs.
           </em>
         </span>
       </label>

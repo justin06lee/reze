@@ -123,6 +123,16 @@ fn default_true() -> bool {
     true
 }
 
+impl Settings {
+    /// Whether this machine keeps its library in sync with the others.
+    ///
+    /// Sync is fetching in both directions, so a machine that will not be
+    /// fetched from has none to offer, whatever `sync` says.
+    pub fn syncs(&self) -> bool {
+        self.sync && self.share_over_tailscale
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -193,10 +203,7 @@ pub fn library_path() -> PathBuf {
     config_dir().join("macros.json")
 }
 
-/// Tracks the exact bytes we last wrote so the file watcher can tell our own
-/// saves apart from a real external edit (otherwise every save round-trips).
 pub struct AppState {
-    pub last_written: Mutex<String>,
     /// Whatever was frontmost when the palette opened — a PID on macOS, a
     /// window on X11 — so focus can be handed back deliberately rather than
     /// hoped for.
@@ -206,10 +213,42 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            last_written: Mutex::new(String::new()),
             previous_app: Mutex::new(None),
         }
     }
+}
+
+/// Held by whoever is changing the library, from reading it to writing it.
+///
+/// The file has several writers — the editor saving, the palette counting a
+/// use, an import, a sync with another machine, the watcher dating a hand
+/// edit — and each of them reads it, changes one thing and writes it all
+/// back. Two doing that at once would each write back a library without the
+/// other's change in it.
+static WRITING: Mutex<()> = Mutex::new(());
+
+/// Take the library for the length of one change to it.
+///
+/// Never across anything slow: commands wait on this from the main thread, so
+/// whatever has to come over a network is fetched before it is taken.
+pub fn lock() -> std::sync::MutexGuard<'static, ()> {
+    // A writer that panicked left nothing half-written — see `write` — so the
+    // lock it was holding is as good as released.
+    WRITING.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The exact bytes last written here, so the file watcher can tell our own
+/// saves apart from a real external edit (otherwise every save round-trips) —
+/// and, when it is one, what the library was before it.
+static WRITTEN: Mutex<String> = Mutex::new(String::new());
+
+pub fn last_written() -> String {
+    WRITTEN.lock().unwrap().clone()
+}
+
+/// Take `raw` as what the file now holds.
+pub fn remember(raw: &str) {
+    *WRITTEN.lock().unwrap() = raw.to_string();
 }
 
 pub fn load() -> Result<Library, String> {
@@ -230,12 +269,18 @@ pub fn serialize(lib: &Library) -> Result<String, String> {
 pub fn save(lib: &Library) -> Result<String, String> {
     let dir = config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
+    let body = write(&library_path(), lib)?;
+    remember(&body);
+    Ok(body)
+}
+
+/// Write a library to `path`, whole or not at all.
+pub fn write(path: &Path, lib: &Library) -> Result<String, String> {
     let body = serialize(lib)?;
-    let path = library_path();
     // Write-then-rename so a crash mid-write can never truncate the library.
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, &body).map_err(|e| format!("writing {tmp:?}: {e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("renaming into {path:?}: {e}"))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("renaming into {path:?}: {e}"))?;
     Ok(body)
 }
 
@@ -299,7 +344,7 @@ fn backups_in(dir: &Path) -> Vec<PathBuf> {
 ///
 /// The backup is used up by this: undoing twice walks back two imports rather
 /// than restoring the same one again.
-pub fn restore_backup() -> Result<(Library, String), String> {
+pub fn restore_backup() -> Result<Library, String> {
     let newest = backups().into_iter().next().ok_or("There is nothing to undo.")?;
     let raw = std::fs::read_to_string(&newest).map_err(|e| format!("reading {newest:?}: {e}"))?;
     // Parsed before it replaces anything: a backup that will not load is not
@@ -310,8 +355,9 @@ pub fn restore_backup() -> Result<(Library, String), String> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, &raw).map_err(|e| format!("writing {tmp:?}: {e}"))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("renaming into {path:?}: {e}"))?;
+    remember(&raw);
     let _ = std::fs::remove_file(&newest);
-    Ok((library, raw))
+    Ok(library)
 }
 
 fn m(name: &str, description: &str, tags: &[&str], body: &str) -> Macro {
