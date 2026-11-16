@@ -6,8 +6,10 @@ mod folders;
 mod grab;
 mod history;
 mod login;
+mod merge;
 mod paste;
 mod store;
+mod tailnet;
 mod typed;
 #[cfg(target_os = "linux")]
 mod x11;
@@ -81,6 +83,7 @@ fn save_library(
         watch_folders(&app, &library.settings.folders);
     }
     history::configure(&library.settings);
+    tailnet::configure(&library.settings);
 
     // Hand back the merged view, not what was written — the windows must not
     // lose their folder macros just because they saved an edit to another one.
@@ -396,6 +399,162 @@ fn forget_clip(app: AppHandle, id: String) {
 fn clear_clips(app: AppHandle) {
     history::clear();
     let _ = app.emit("clipboard-changed", history::views());
+}
+
+// ------------------------------------------------------------ other devices
+
+/// Whether Tailscale is up, and which of the user's other machines run Reze.
+///
+/// Async because it waits on every one of them at once — see
+/// [`tailnet::status`] — and a sleeping laptop takes seconds to not answer.
+#[tauri::command]
+async fn tailnet_status() -> tailnet::Tailnet {
+    tauri::async_runtime::spawn_blocking(tailnet::status)
+        .await
+        .unwrap_or(tailnet::Tailnet::Stopped)
+}
+
+/// What importing from the machine at `address` would do, without doing it.
+#[tauri::command]
+async fn import_preview(address: String) -> Result<merge::Preview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let theirs = tailnet::library_of(&address)?;
+        let mine = store::load()?;
+        Ok(merge::preview(
+            &mine,
+            &theirs.library,
+            theirs.hello.os == std::env::consts::OS,
+            |file| assets::path_for(file).is_ok_and(|path| path.exists()),
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// What an import did, for the line Settings shows once it is over.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportOutcome {
+    /// The machine it came from, by its tailnet name.
+    from: String,
+    added: usize,
+    updated: usize,
+    removed: usize,
+    /// Attachment files that had to be fetched.
+    attachments: usize,
+    /// Attachments that machine's library names but could not hand over.
+    missing: Vec<String>,
+    /// Anything asked for that was deliberately not done.
+    warnings: Vec<String>,
+}
+
+/// Bring the library of the machine at `address` into this one.
+///
+/// `replace` makes this library a copy of that one; without it, what only this
+/// machine has is kept. See [`merge`] for what "the same macro" means.
+#[tauri::command]
+async fn import_library(
+    app: AppHandle,
+    address: String,
+    replace: bool,
+    settings: bool,
+) -> Result<ImportOutcome, String> {
+    tauri::async_runtime::spawn_blocking(move || run_import(&app, &address, replace, settings))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn run_import(
+    app: &AppHandle,
+    address: &str,
+    replace: bool,
+    settings: bool,
+) -> Result<ImportOutcome, String> {
+    // Fetched again rather than carried over from the preview: what gets
+    // merged should be what is there now, not what was there when asked.
+    let theirs = tailnet::library_of(address)?;
+    let mine = store::load()?;
+    let mut result = merge::merge(
+        &mine,
+        &theirs.library,
+        merge::Choices {
+            replace,
+            settings,
+            hotkeys: settings && theirs.hello.os == std::env::consts::OS,
+        },
+    );
+
+    // Files first, library last — see `collect` for why the order matters.
+    let collected = theirs.collect(&mut result, &assets::assets_dir())?;
+
+    // The one write in this app that replaces macros nobody had open in front
+    // of them, so the library as it is goes aside first — see `undo_import`.
+    store::backup()?;
+
+    // Hotkeys that came along are registered before they are saved, the same
+    // rule as rebinding one by hand: a combination another app already holds
+    // must not end up written down as this machine's way in.
+    let mut warnings = Vec::new();
+    let keys = |s: &store::Settings| {
+        [s.hotkey.clone(), s.expand_hotkey.clone(), s.clipboard_hotkey.clone()]
+    };
+    let (before, after) = (keys(&mine.settings), keys(&result.library.settings));
+    let rebind = |[palette, expand, clipboard]: &[String; 3]| {
+        register_hotkeys(app, palette, expand, clipboard)
+    };
+    if before != after {
+        if let Err(e) = rebind(&after) {
+            let _ = rebind(&before);
+            let s = &mut result.library.settings;
+            [s.hotkey, s.expand_hotkey, s.clipboard_hotkey] = before.clone();
+            warnings.push(format!("The hotkeys were left as they were ({e})."));
+        }
+    }
+
+    let written = match store::save(&result.library) {
+        Ok(written) => written,
+        Err(e) => {
+            let _ = rebind(&before);
+            return Err(e);
+        }
+    };
+    *app.state::<AppState>().last_written.lock().unwrap() = written;
+    history::configure(&result.library.settings);
+
+    let outcome = ImportOutcome {
+        from: theirs.name,
+        added: result.added,
+        updated: result.updated,
+        removed: result.removed,
+        attachments: collected.fetched,
+        missing: collected.missing,
+        warnings,
+    };
+    app.emit("library-changed", &merged().unwrap_or(result.library)).ok();
+    Ok(outcome)
+}
+
+/// Put the library back the way it was before the last import.
+#[tauri::command]
+fn undo_import(app: AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let folders_before = store::load().map(|l| l.settings.folders).unwrap_or_default();
+    let (library, raw) = store::restore_backup()?;
+    *state.last_written.lock().unwrap() = raw;
+
+    // Everything a save would have re-pointed, since the settings may have
+    // gone back with the macros.
+    let s = &library.settings;
+    if let Err(e) = register_hotkeys(&app, &s.hotkey, &s.expand_hotkey, &s.clipboard_hotkey) {
+        eprintln!("reze: {e}");
+    }
+    if folders_before != s.folders {
+        watch_folders(&app, &s.folders);
+    }
+    history::configure(s);
+    tailnet::configure(s);
+
+    app.emit("library-changed", &merged().unwrap_or(library)).ok();
+    Ok(())
 }
 
 /// Hide the palette, then deliver `text` and `attachments` to whatever app
@@ -1166,6 +1325,10 @@ pub fn run() {
             forget_clip,
             clear_clips,
             deliver_clip,
+            tailnet_status,
+            import_preview,
+            import_library,
+            undo_import,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -1270,6 +1433,10 @@ pub fn run() {
 
             folders::ensure_ours(&lib.settings.folders);
             watch_folders(&handle, &lib.settings.folders);
+
+            tailnet::configure(&lib.settings);
+            tailnet::start(handle.clone());
+
             spawn_watcher(handle);
             Ok(())
         })

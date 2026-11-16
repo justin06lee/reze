@@ -244,10 +244,19 @@ pub fn ext_for_mime(mime: &str) -> &'static str {
 /// look like a library with no macros in it at all. Sweeping on that would
 /// delete every attachment the user has over a transient empty read, so
 /// orphans from hand-editing simply wait for the next save in the app.
+///
+/// What a [backup](crate::store::backup) names counts as referenced too. A
+/// library set aside before an import is only worth having if the files it
+/// points at are still there when it is put back.
 pub fn sweep(library: &crate::store::Library) {
-    let referenced: std::collections::HashSet<&str> = library
-        .macros
+    let backups: Vec<crate::store::Library> = crate::store::backups()
         .iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .filter_map(|raw| serde_json::from_str(&raw).ok())
+        .collect();
+    let referenced: std::collections::HashSet<&str> = std::iter::once(library)
+        .chain(&backups)
+        .flat_map(|l| l.macros.iter())
         .flat_map(|m| m.attachments.iter())
         .map(|a| a.file.as_str())
         .collect();

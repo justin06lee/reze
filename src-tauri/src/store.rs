@@ -6,7 +6,7 @@
 
 use crate::assets::Attachment;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub const FORMAT_VERSION: u32 = 1;
@@ -68,6 +68,12 @@ pub struct Settings {
     /// How many copies to keep.
     #[serde(default = "crate::history::default_limit")]
     pub clipboard_limit: u32,
+    /// Whether this user's other machines may fetch this library over
+    /// Tailscale. See [`crate::tailnet`]. On by default: the whole point is
+    /// that the second machine finds the first without a trip back to it, and
+    /// nothing answers to anyone but devices signed in as the same user.
+    #[serde(default = "default_true")]
+    pub share_over_tailscale: bool,
 }
 
 /// Seeded rather than left empty so grabbing works the moment it is pressed,
@@ -114,6 +120,7 @@ impl Default for Settings {
             clipboard_hotkey: default_clipboard_hotkey(),
             clipboard_history: true,
             clipboard_limit: crate::history::default_limit(),
+            share_over_tailscale: true,
         }
     }
 }
@@ -205,6 +212,81 @@ pub fn save(lib: &Library) -> Result<String, String> {
     std::fs::write(&tmp, &body).map_err(|e| format!("writing {tmp:?}: {e}"))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("renaming into {path:?}: {e}"))?;
     Ok(body)
+}
+
+// ---------------------------------------------------------------- backups
+
+/// How many set-aside libraries to keep.
+///
+/// Enough to walk back through an afternoon of importing from the wrong
+/// machine; few enough that the attachments they keep alive — see
+/// [`crate::assets::sweep`] — are eventually let go.
+const BACKUPS: usize = 5;
+
+pub fn backups_dir() -> PathBuf {
+    config_dir().join("backups")
+}
+
+/// Set the library aside before something replaces it wholesale.
+///
+/// An import is the one thing in this app that rewrites macros you did not have
+/// open in front of you, so it is also the one thing that leaves a copy behind:
+/// the file as it is on disk, byte for byte, hand edits and all.
+pub fn backup() -> Result<PathBuf, String> {
+    backup_into(&library_path(), &backups_dir())
+}
+
+fn backup_into(library: &Path, dir: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("creating {dir:?}: {e}"))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    // Zero-padded so that sorting the names sorts the backups.
+    let dest = dir.join(format!("macros-{stamp:014}.json"));
+    std::fs::copy(library, &dest).map_err(|e| format!("backing up to {dest:?}: {e}"))?;
+    for old in backups_in(dir).into_iter().skip(BACKUPS) {
+        let _ = std::fs::remove_file(old);
+    }
+    Ok(dest)
+}
+
+/// Every backup, newest first.
+pub fn backups() -> Vec<PathBuf> {
+    backups_in(&backups_dir())
+}
+
+fn backups_in(dir: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|entries| entries.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    found.retain(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("macros-") && n.ends_with(".json"))
+    });
+    found.sort();
+    found.reverse();
+    found
+}
+
+/// Put the newest backup back as the library, and return what it holds.
+///
+/// The backup is used up by this: undoing twice walks back two imports rather
+/// than restoring the same one again.
+pub fn restore_backup() -> Result<(Library, String), String> {
+    let newest = backups().into_iter().next().ok_or("There is nothing to undo.")?;
+    let raw = std::fs::read_to_string(&newest).map_err(|e| format!("reading {newest:?}: {e}"))?;
+    // Parsed before it replaces anything: a backup that will not load is not
+    // an improvement on whatever is there now.
+    let library: Library =
+        serde_json::from_str(&raw).map_err(|e| format!("parsing {newest:?}: {e}"))?;
+    let path = library_path();
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &raw).map_err(|e| format!("writing {tmp:?}: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("renaming into {path:?}: {e}"))?;
+    let _ = std::fs::remove_file(&newest);
+    Ok((library, raw))
 }
 
 fn m(name: &str, description: &str, tags: &[&str], body: &str) -> Macro {
@@ -324,4 +406,56 @@ fn seed_macros() -> Vec<Macro> {
             "Analyze the following and tell me what is wrong with it:\n\n```\n{{clipboard}}\n```",
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("reze-store-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_library_written_before_sharing_existed_still_loads_and_shares() {
+        let old = r#"{"version":1,"settings":{"hotkey":"CmdOrCtrl+Shift+Space",
+            "pasteMode":"paste","restoreClipboard":true},"macros":[]}"#;
+        let library: Library = serde_json::from_str(old).unwrap();
+        assert!(library.settings.share_over_tailscale);
+    }
+
+    #[test]
+    fn a_backup_is_the_file_as_it_was() {
+        let dir = scratch("backup");
+        let library = dir.join("macros.json");
+        std::fs::write(&library, "exactly this").unwrap();
+
+        let copy = backup_into(&library, &dir.join("backups")).unwrap();
+
+        assert_eq!(std::fs::read_to_string(copy).unwrap(), "exactly this");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn only_the_newest_backups_are_kept_and_they_list_newest_first() {
+        let dir = scratch("prune");
+        let library = dir.join("macros.json");
+        let backups = dir.join("backups");
+        let mut made = Vec::new();
+        for n in 0..BACKUPS + 2 {
+            std::fs::write(&library, n.to_string()).unwrap();
+            made.push(backup_into(&library, &backups).unwrap());
+            // The names are millisecond stamps; two in one would be one file.
+            std::thread::sleep(std::time::Duration::from_millis(3));
+        }
+
+        let kept = backups_in(&backups);
+
+        assert_eq!(kept.len(), BACKUPS);
+        assert_eq!(kept.first(), made.last(), "the newest is not listed first");
+        assert!(!made[0].exists() && !made[1].exists(), "the oldest were not pruned");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

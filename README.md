@@ -39,9 +39,9 @@ you actually meant gets pasted into whatever app you were already in.
 make
 ```
 
-One command is the whole path: it stops any running copy, clears the stale
-Accessibility entry left by a previous install, builds the app with bun, puts a
-fresh **Reze.app** in `/Applications`, and launches it. After pulling changes,
+One command is the whole path: it stops any running copy, builds the app with
+bun, signs and notarizes it if it can ([Signing](#signing)), puts a fresh
+**Reze.app** in `/Applications`, and launches it. After pulling changes,
 `make update` runs the same refresh.
 
 `make build` alone produces both bundles under
@@ -52,24 +52,24 @@ fresh **Reze.app** in `/Applications`, and launches it. After pulling changes,
 | `macos/Reze.app` | The app itself (~12 MB) |
 | `dmg/Reze_<version>_aarch64.dmg` | Disk image (~4 MB) with a drag-to-`Applications` layout |
 
+The disk image is laid out by scripting Finder, which macOS only lets a
+terminal do once you have allowed it. Where that is not possible — over ssh,
+say — `make` carries on without one and installs the app all the same.
+
 There is no Dock icon and no window on launch — it is a menu-bar app, so look
 for the bomb glyph up top. Press `⌘⇧Space` to confirm it is alive.
 
 Two things to know on first run:
 
-- **Grant Accessibility when macOS asks.** The permission is tied to the exact
-  binary, so a dev build, the installed app, and every rebuilt version of it
-  are all separate entries — and a stale one can keep looking ticked in System
-  Settings while being inert. `make` and `make update` reset the stale entry
-  before installing, so the fresh app prompts cleanly; all that is left is to
-  allow it. Until then the palette still works, and `⌘↵` still copies to the
-  clipboard.
-- **It is ad-hoc signed, not notarized.** Building and running it on your own
-  machine is fine — locally built apps never get the quarantine flag. If you
-  copy the `.dmg` to another Mac it *will* be flagged, and Gatekeeper will
-  refuse to open it. There, either right-click the app → **Open**, or strip the
-  flag: `xattr -dr com.apple.quarantine /Applications/Reze.app`. Signing it
-  properly needs a paid Apple Developer ID.
+- **Grant Accessibility when macOS asks.** Until then the palette still works,
+  and `⌘↵` still copies to the clipboard. How often it asks depends on how the
+  build is signed — once ever, or once per build. See [Signing](#signing).
+- **Without a certificate it is ad-hoc signed, not notarized.** Building and
+  running it on your own machine is fine — locally built apps never get the
+  quarantine flag. Copy that `.dmg` to another Mac and it *will* be flagged,
+  and Gatekeeper will refuse to open it. There, either right-click the app →
+  **Open**, or strip the flag:
+  `xattr -dr com.apple.quarantine /Applications/Reze.app`.
 
 `make build` targets the host architecture — `aarch64` on Apple Silicon. For a
 binary that also runs on Intel Macs, build
@@ -82,12 +82,70 @@ it also appears under System Settings → General → Login Items — the two ar
 same switch, and either one can turn it off. Needs macOS 13 or later, and the
 installed `Reze.app` rather than a dev build.
 
-Reinstalling replaces the app bundle and clears the registration along with the
-Accessibility grant, so tick it again after `make update`.
+Reinstalling an ad-hoc build replaces the app bundle and clears the
+registration along with the Accessibility grant, so tick it again after
+`make update`.
 
 On Linux the same switch writes `~/.config/autostart/reze.desktop`, which every
 freedesktop session starts at login and GNOME Tweaks lists under Startup
 Applications. Reinstalling leaves it in place.
+
+### Signing
+
+macOS does not grant Accessibility to "Reze". It grants it to *whoever signed
+Reze*, and checks that signature on every use. That is the whole story behind
+permissions that go stale:
+
+- **Signed with a Developer ID certificate**, every build has the same signer.
+  Grant Accessibility once and it holds across `make update`, forever.
+- **Ad-hoc** — what you get with no certificate — a build is signed by nobody,
+  and its identity is the hash of that one binary. Every rebuild is a stranger.
+  The old grant keeps looking ticked in System Settings while doing nothing,
+  so `make` clears it and the new build asks again.
+
+`make` signs with a *Developer ID Application* certificate if the keychain has
+one, and falls back to ad-hoc if not. `make signing` says which it will be:
+
+```
+Signing:    Developer ID Application: Your Name (TEAMID1234)
+Notarizing: with the 'reze-notary' keychain profile
+Installed:  TEAMID1234
+```
+
+Setting that up is two things, once per Mac, and needs a paid Apple Developer
+account:
+
+1. **The certificate.** In Keychain Access: *Certificate Assistant → Request a
+   Certificate From a Certificate Authority…*, saved to disk. Upload that file
+   at [developer.apple.com → Certificates](https://developer.apple.com/account/resources/certificates/add),
+   choosing **Developer ID Application**, then download the certificate it
+   gives back and double-click it. (Only the account holder can create one.)
+   With Xcode installed, *Settings → Accounts → Manage Certificates* does the
+   same in one click.
+2. **Somewhere for notarization to log in from.** Make an app-specific password
+   at [account.apple.com](https://account.apple.com) → Sign-In and Security,
+   then store it in the keychain under the name the Makefile looks for:
+   ```bash
+   xcrun notarytool store-credentials reze-notary \
+     --apple-id you@example.com --team-id TEAMID1234
+   ```
+   It asks for the password and keeps it in the keychain; nothing is written
+   to the repo.
+
+Notarizing is the second half and is separate from the first. It is not what
+keeps permissions — the signature does that — it is what lets the `.dmg` open
+on a Mac that did not build it. With the certificate but no stored login,
+`make` signs, skips notarizing, and says so. With both, it submits the disk
+image, waits for Apple (a minute or two), and staples the answer to the image
+and the app.
+
+The first signed install clears whatever the ad-hoc builds left behind, so
+Accessibility is asked for one last time. After that an install only clears it
+if the signer changes. `make reset-permissions` does it by hand — every
+permission macOS holds for Reze, and nothing belonging to any other app.
+
+Dev builds (`bun run tauri dev`) are not signed, and are a separate entry in
+System Settings that goes stale the same old way.
 
 ### On Linux
 
@@ -501,7 +559,8 @@ the change on next read. Diff it, commit it, sync it however you like.
     "restoreClipboard": true,
     "clipboardHotkey": "CmdOrCtrl+Shift+V",
     "clipboardHistory": true,    // remember what you copy
-    "clipboardLimit": 200
+    "clipboardLimit": 200,
+    "shareOverTailscale": true   // let your other machines import this
   },
   "macros": [
     {
@@ -525,6 +584,76 @@ Two settings are deliberately not in here: the Accessibility grant and the
 launch-at-login switch. Both are owned by macOS, and a copy of the answer in
 this file would start lying the moment you changed it in System Settings — so
 Reze reads them back from the OS instead of remembering them.
+
+## Other devices
+
+With [Tailscale](https://tailscale.com) running, Reze can copy the library from
+another of your machines. **Settings → Other devices** lists them, says which
+have a Reze answering, and imports from any that do:
+
+```
+● Tailscale is connected. This machine is mac-mini            Look again
+┌──────────────────────────────────────────────────────────────────────┐
+│ ● tenet   Linux                 16 macros · 5 attachments   Import… │
+│ ○ midna   Linux                             Reze is not answering   │
+│ ○ laptop  macOS                                           offline   │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Import…** fetches that machine's library and says what would happen before
+anything does:
+
+```
+ 6  new                                     bug report, standup and 4 more
+ 2  different here — tenet's version wins   full analysis, rigor
+ 8  already the same
+ 2  only on this machine                    from clipboard, scratch
+
+ (•) Add and update          keeps the 2 only this machine has
+ ( ) Replace this library    removes them, leaving a copy of tenet's
+ [ ] Bring its settings too
+```
+
+A macro there and a macro here are the same macro if they share an id or,
+failing that, a trigger — every install seeds the same starter macros under ids
+of its own, and two machines' `full analysis` should meet as one. Where both
+have it and they differ, the other machine's version wins; the use count stays
+yours. Attachments come along with the macros that carry them.
+
+What never comes along: watched folders and the macros made from them, which
+are paths on that machine; the clipboard history; and, between a Mac and a
+Linux machine, the hotkeys, which are different on purpose.
+
+The library as it was is set aside in `~/.reze/backups/` first — the last five
+are kept, along with the attachments they name — and **Undo**, which appears
+the moment an import finishes, puts the newest one back.
+
+### What is listening
+
+To be imported *from*, a Reze answers on port 7393 of its machine's Tailscale
+address. Tailscale already encrypts the connection and knows who is on the
+other end of it, so Reze adds no accounts, keys or pairing of its own — and
+keeps what it does to three rules:
+
+- **Only that address.** Not the local network, not the internet: nothing off
+  your tailnet can open a connection at all.
+- **Only your devices.** Each connection is put to `tailscale whois`, and
+  anything not signed in as the same user as this machine — a colleague on a
+  shared tailnet, a node shared in from another one, a tagged server — is
+  refused whatever it asks for.
+- **Only reading.** It hands over `macros.json` and the attachment files that
+  names. No request changes anything; importing is something the other machine
+  does to itself.
+
+**Let my other devices import from this one** switches it off, and then nothing
+listens. It is on by default so that a second machine finds the first without
+a trip back to it.
+
+Both machines need Tailscale signed in as the same user and a Reze new enough
+to have this. If a machine shows as *not answering* and Reze is running there,
+a firewall is the usual reason — with `ufw`, `sudo ufw allow in on tailscale0`.
+It is plain HTTP inside the tunnel, so `curl http://tenet:7393/reze` shows what
+another Reze would see.
 
 ## Typing awareness
 
@@ -577,8 +706,9 @@ System Settings → Privacy & Security → Accessibility when the permission is
 missing. Your previous clipboard contents are restored a moment after the paste
 lands (turn that off in Settings if you'd rather they weren't).
 
-Note that the permission is granted per-binary: the dev build and a bundled
-`Reze.app` are separate entries, and each needs granting once.
+Note that the permission is granted to a signature: the dev build and a bundled
+`Reze.app` are separate entries, and whether a rebuilt app counts as the one
+you already allowed is down to how it was signed — see [Signing](#signing).
 
 Linux has no such permission — X11 lets any app synthesize input — so there is
 nothing to grant and no banner.
@@ -603,6 +733,8 @@ bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/b
 - `src-tauri/src/focus.rs` — remembering who had focus, and pasteboard change detection
 - `src-tauri/src/login.rs` — the launch-at-login switch, via `SMAppService` (an XDG autostart entry on Linux)
 - `src-tauri/src/x11.rs` — Linux: focus, app names and icons, terminals (`cargo test`)
+- `src-tauri/src/tailnet.rs` — other machines over Tailscale: finding them, answering them, asking them (`cargo test`)
+- `src-tauri/src/merge.rs` — what importing another library does to this one (`cargo test`)
 - `src-tauri/src/lib.rs` — windows, tray, global hotkeys, file watcher, IPC commands
 - `src/lib/template.ts` — the template language (variables, includes, built-ins)
 - `src/lib/fuzzy.ts` — the palette's ranking
