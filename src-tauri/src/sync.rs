@@ -181,19 +181,34 @@ fn fingerprint(m: &Macro) -> u64 {
     hash
 }
 
+/// Whether this is a starter macro nobody has touched: exactly as the first
+/// launch wrote it, and never dated since.
+///
+/// These are not part of what is synced. Every install writes itself the
+/// same set, so a new machine has nothing to tell the others by having them —
+/// and handed over, they would put back onto a library someone has spent a
+/// year pruning every starter macro that was thrown out of it, and do so
+/// again with each machine set up after that. They stay where they are, each
+/// install's own. Edit one and it is dated, and is a macro like any other
+/// from then on; and where the other machine has its own version of one, by
+/// id or by trigger, the two still meet and [`rank`] still picks between them.
+fn starter(m: &Macro) -> bool {
+    m.updated_at == 0 && crate::store::is_seed(m)
+}
+
 /// What a library holds, as a few characters that are the same on every
 /// machine holding the same thing — and, near enough to always, different on
 /// any holding something else.
 ///
 /// Two machines compare these before anything is fetched, which is what makes
-/// asking every minute cheap. Everything [`reconcile`] goes by is in it and
-/// nothing else is: not the order the macros are in, not the use counts, not
-/// the settings.
+/// asking every minute cheap. Everything [`reconcile`] would hand over is in
+/// it and nothing else is: not the order the macros are in, not the use
+/// counts, not the settings, and not the [`starter`] macros.
 pub fn revision(library: &Library) -> String {
     let mut macros: Vec<(&str, u64, u64)> = library
         .macros
         .iter()
-        .filter(|m| m.folder.is_none())
+        .filter(|m| m.folder.is_none() && !starter(m))
         .map(|m| (m.id.as_str(), m.updated_at, fingerprint(m)))
         .collect();
     macros.sort_unstable();
@@ -231,7 +246,7 @@ pub fn revision(library: &Library) -> String {
 /// answer everywhere, which is the only thing a tie-break is for.
 fn rank(m: &Macro) -> (u64, u64, &str) {
     let when = match m.updated_at {
-        0 if crate::store::is_seed(m) => 0,
+        _ if starter(m) => 0,
         0 => 1,
         stamped => stamped,
     };
@@ -256,8 +271,9 @@ pub struct Reconciled {
 /// Macros are paired the way an import pairs them — by id, then by trigger —
 /// and for each pair the greater [`rank`] is kept. What only they have is
 /// added and what only we have stays, unless a deletion newer than the macro
-/// says otherwise. Use counts, settings and everything else that describes
-/// one machine rather than the library are left alone.
+/// says otherwise, or it is a [`starter`] macro, which stays where it is. Use
+/// counts, settings and everything else that describes one machine rather
+/// than the library are left alone.
 pub fn reconcile(mine: &Library, theirs: &Library, now: u64) -> Reconciled {
     let arriving = portable(theirs);
 
@@ -277,12 +293,12 @@ pub fn reconcile(mine: &Library, theirs: &Library, now: u64) -> Reconciled {
     for (theirs, ours) in arriving.iter().zip(counterparts(&mine.macros, &arriving)) {
         match ours {
             Some(i) => theirs_of[i] = Some(theirs),
+            None if dead(theirs) || starter(theirs) => {}
             // New here, and on top — where a macro made in the editor goes.
-            None if !dead(theirs) => {
+            None => {
                 incoming.extend(theirs.attachments.iter().cloned());
                 macros.push(theirs.clone());
             }
-            None => {}
         }
     }
     for (ours, theirs) in mine.macros.iter().zip(theirs_of) {
@@ -434,6 +450,33 @@ mod tests {
 
         assert_eq!(both.macros.len(), 1, "the two met as two macros");
         assert_eq!(both.macros[0].body, "a year of tuning");
+    }
+
+    #[test]
+    fn starter_macros_nobody_touched_are_not_handed_over() {
+        // A machine set up this morning, and a library whose owner threw the
+        // starter macros out long before deletions were remembered.
+        let fresh = crate::store::Library::default();
+        let pruned = lib(vec![mac("1", "written by hand", "x", 0)]);
+
+        let at_pruned = reconcile(&pruned, &fresh, NOW);
+        let at_fresh = reconcile(&fresh, &pruned, NOW);
+
+        assert!(!at_pruned.changed, "the starter macros came back");
+        assert_eq!(at_fresh.library.macros.len(), fresh.macros.len() + 1);
+        // Which is the two of them in sync, each with its own furniture.
+        assert_eq!(revision(&at_pruned.library), revision(&at_fresh.library));
+        assert!(!reconcile(&at_fresh.library, &at_pruned.library, NOW).changed);
+
+        // Edited, one is a macro like any other, and goes across.
+        let mut edited = at_fresh.library.clone();
+        let mine = edited.macros.iter_mut().find(|m| m.name == "rigor").unwrap();
+        mine.body = "made my own".into();
+        mine.updated_at = NOW;
+        let reached = reconcile(&at_pruned.library, &edited, NOW).library;
+        assert!(reached.macros.iter().any(|m| m.body == "made my own"));
+        assert_eq!(reached.macros.len(), 2, "the rest came with it");
+        assert_eq!(revision(&reached), revision(&edited));
     }
 
     #[test]

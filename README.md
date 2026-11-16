@@ -636,11 +636,17 @@ it in the meantime.
   loses to a newer one.
 - **The first sync is a merge.** Nothing is thrown away to make two libraries
   agree: each machine gets what only the other had. Macros both have are
-  matched by id or, failing that, by trigger, so two installs' starter macros
-  meet as one — and an untouched starter macro always gives way to one that
-  has been edited. Macros last edited before Reze dated changes carry no date
-  to compare; where two of those differ, one is picked, the same one on both
-  machines.
+  matched by id or, failing that, by trigger, so two installs' versions of
+  `full analysis` meet as one. Macros last edited before Reze dated changes
+  carry no date to compare; where two of those differ, one is picked, the same
+  one on both machines.
+- **Starter macros you never touched stay put.** Every install writes itself
+  the same starter set, so a new machine's untouched copies are not handed to
+  the others — otherwise each machine you set up would put back every starter
+  macro you had thrown out of your library. They give way to an edited version
+  from another machine, and the moment you edit one yourself it syncs like any
+  other. This is why a new machine can say *in sync* while holding a few more
+  macros than the rest: delete the starters there if you do not want them.
 - **The library is set aside first.** Ticking the box copies it to
   `~/.reze/backups/` before anything arrives, the way an import does.
 
