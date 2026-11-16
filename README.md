@@ -39,9 +39,9 @@ you actually meant gets pasted into whatever app you were already in.
 make
 ```
 
-One command is the whole path: it stops any running copy, clears the stale
-Accessibility entry left by a previous install, builds the app with bun, puts a
-fresh **Reze.app** in `/Applications`, and launches it. After pulling changes,
+One command is the whole path: it stops any running copy, builds the app with
+bun, signs and notarizes it if it can ([Signing](#signing)), puts a fresh
+**Reze.app** in `/Applications`, and launches it. After pulling changes,
 `make update` runs the same refresh.
 
 `make build` alone produces both bundles under
@@ -52,24 +52,24 @@ fresh **Reze.app** in `/Applications`, and launches it. After pulling changes,
 | `macos/Reze.app` | The app itself (~12 MB) |
 | `dmg/Reze_<version>_aarch64.dmg` | Disk image (~4 MB) with a drag-to-`Applications` layout |
 
+The disk image is laid out by scripting Finder, which macOS only lets a
+terminal do once you have allowed it. Where that is not possible — over ssh,
+say — `make` carries on without one and installs the app all the same.
+
 There is no Dock icon and no window on launch — it is a menu-bar app, so look
 for the bomb glyph up top. Press `⌘⇧Space` to confirm it is alive.
 
 Two things to know on first run:
 
-- **Grant Accessibility when macOS asks.** The permission is tied to the exact
-  binary, so a dev build, the installed app, and every rebuilt version of it
-  are all separate entries — and a stale one can keep looking ticked in System
-  Settings while being inert. `make` and `make update` reset the stale entry
-  before installing, so the fresh app prompts cleanly; all that is left is to
-  allow it. Until then the palette still works, and `⌘↵` still copies to the
-  clipboard.
-- **It is ad-hoc signed, not notarized.** Building and running it on your own
-  machine is fine — locally built apps never get the quarantine flag. If you
-  copy the `.dmg` to another Mac it *will* be flagged, and Gatekeeper will
-  refuse to open it. There, either right-click the app → **Open**, or strip the
-  flag: `xattr -dr com.apple.quarantine /Applications/Reze.app`. Signing it
-  properly needs a paid Apple Developer ID.
+- **Grant Accessibility when macOS asks.** Until then the palette still works,
+  and `⌘↵` still copies to the clipboard. How often it asks depends on how the
+  build is signed — once ever, or once per build. See [Signing](#signing).
+- **Without a certificate it is ad-hoc signed, not notarized.** Building and
+  running it on your own machine is fine — locally built apps never get the
+  quarantine flag. Copy that `.dmg` to another Mac and it *will* be flagged,
+  and Gatekeeper will refuse to open it. There, either right-click the app →
+  **Open**, or strip the flag:
+  `xattr -dr com.apple.quarantine /Applications/Reze.app`.
 
 `make build` targets the host architecture — `aarch64` on Apple Silicon. For a
 binary that also runs on Intel Macs, build
@@ -82,12 +82,70 @@ it also appears under System Settings → General → Login Items — the two ar
 same switch, and either one can turn it off. Needs macOS 13 or later, and the
 installed `Reze.app` rather than a dev build.
 
-Reinstalling replaces the app bundle and clears the registration along with the
-Accessibility grant, so tick it again after `make update`.
+Reinstalling an ad-hoc build replaces the app bundle and clears the
+registration along with the Accessibility grant, so tick it again after
+`make update`.
 
 On Linux the same switch writes `~/.config/autostart/reze.desktop`, which every
 freedesktop session starts at login and GNOME Tweaks lists under Startup
 Applications. Reinstalling leaves it in place.
+
+### Signing
+
+macOS does not grant Accessibility to "Reze". It grants it to *whoever signed
+Reze*, and checks that signature on every use. That is the whole story behind
+permissions that go stale:
+
+- **Signed with a Developer ID certificate**, every build has the same signer.
+  Grant Accessibility once and it holds across `make update`, forever.
+- **Ad-hoc** — what you get with no certificate — a build is signed by nobody,
+  and its identity is the hash of that one binary. Every rebuild is a stranger.
+  The old grant keeps looking ticked in System Settings while doing nothing,
+  so `make` clears it and the new build asks again.
+
+`make` signs with a *Developer ID Application* certificate if the keychain has
+one, and falls back to ad-hoc if not. `make signing` says which it will be:
+
+```
+Signing:    Developer ID Application: Your Name (TEAMID1234)
+Notarizing: with the 'reze-notary' keychain profile
+Installed:  TEAMID1234
+```
+
+Setting that up is two things, once per Mac, and needs a paid Apple Developer
+account:
+
+1. **The certificate.** In Keychain Access: *Certificate Assistant → Request a
+   Certificate From a Certificate Authority…*, saved to disk. Upload that file
+   at [developer.apple.com → Certificates](https://developer.apple.com/account/resources/certificates/add),
+   choosing **Developer ID Application**, then download the certificate it
+   gives back and double-click it. (Only the account holder can create one.)
+   With Xcode installed, *Settings → Accounts → Manage Certificates* does the
+   same in one click.
+2. **Somewhere for notarization to log in from.** Make an app-specific password
+   at [account.apple.com](https://account.apple.com) → Sign-In and Security,
+   then store it in the keychain under the name the Makefile looks for:
+   ```bash
+   xcrun notarytool store-credentials reze-notary \
+     --apple-id you@example.com --team-id TEAMID1234
+   ```
+   It asks for the password and keeps it in the keychain; nothing is written
+   to the repo.
+
+Notarizing is the second half and is separate from the first. It is not what
+keeps permissions — the signature does that — it is what lets the `.dmg` open
+on a Mac that did not build it. With the certificate but no stored login,
+`make` signs, skips notarizing, and says so. With both, it submits the disk
+image, waits for Apple (a minute or two), and staples the answer to the image
+and the app.
+
+The first signed install clears whatever the ad-hoc builds left behind, so
+Accessibility is asked for one last time. After that an install only clears it
+if the signer changes. `make reset-permissions` does it by hand — every
+permission macOS holds for Reze, and nothing belonging to any other app.
+
+Dev builds (`bun run tauri dev`) are not signed, and are a separate entry in
+System Settings that goes stale the same old way.
 
 ### On Linux
 
@@ -648,8 +706,9 @@ System Settings → Privacy & Security → Accessibility when the permission is
 missing. Your previous clipboard contents are restored a moment after the paste
 lands (turn that off in Settings if you'd rather they weren't).
 
-Note that the permission is granted per-binary: the dev build and a bundled
-`Reze.app` are separate entries, and each needs granting once.
+Note that the permission is granted to a signature: the dev build and a bundled
+`Reze.app` are separate entries, and whether a rebuilt app counts as the one
+you already allowed is down to how it was signed — see [Signing](#signing).
 
 Linux has no such permission — X11 lets any app synthesize input — so there is
 nothing to grant and no banner.

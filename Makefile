@@ -2,21 +2,86 @@ APP       := Reze
 BUNDLE_ID := com.huiyunlee.reze
 UNAME     := $(shell uname -s)
 
-.PHONY: all build install update stop reset-permissions launch
+.PHONY: all build notarize install update stop reset-permissions launch signing
 
 ifeq ($(UNAME),Darwin)
 
 BUNDLE    := src-tauri/target/release/bundle/macos/$(APP).app
+IMAGES    := src-tauri/target/release/bundle/dmg
+INSTALLED := /Applications/$(APP).app
 
-all: stop reset-permissions build install launch
+# The Developer ID certificate to sign with, if the keychain has one.
+#
+# macOS ties the Accessibility grant to who signed the app. Signed with a
+# certificate, that is the same answer for every build, so the grant is given
+# once and kept. With none, a build is signed by nobody: its identity is the
+# hash of that one binary, and every rebuild is a stranger asking again.
+IDENTITY ?= $(shell security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)
 
+# The keychain profile `xcrun notarytool store-credentials` saved an Apple ID
+# under. Only its name is here; the password never leaves the keychain.
+NOTARY ?= reze-notary
+
+all: stop build notarize install launch
+
+# Tauri signs the app and the disk image itself when it is told who as, with
+# the hardened runtime notarization requires.
+TAURI := $(if $(IDENTITY),APPLE_SIGNING_IDENTITY="$(IDENTITY)") bun run tauri build
+
+# The disk image is laid out by scripting Finder, which macOS lets a terminal
+# do once it has been allowed to — and which a build started from anything
+# else (ssh, CI, an agent) times out waiting for. The app needs none of that,
+# so a failed image is not a failed build: it is built again without one.
 build:
 	bun install
-	bun run tauri build
+	$(TAURI) || { \
+		echo "No disk image this time; building the app alone."; \
+		rm -f $(IMAGES)/$(APP)_*.dmg; \
+		$(TAURI) --bundles app; \
+	}
 
+# Have Apple check the build, and attach its answer to the disk image and the
+# app. Keeping permissions does not need this — the signature does that — but
+# without it Gatekeeper refuses a copy taken to another Mac.
+#
+# The disk image is what is submitted when there is one: that covers the app
+# inside it in one trip. A rejection stops here, before anything is installed.
+notarize:
+ifeq ($(IDENTITY),)
+	@echo "No Developer ID certificate in the keychain: an ad-hoc build, nothing to notarize."
+else
+	@if ! xcrun notarytool history --keychain-profile "$(NOTARY)" >/dev/null 2>&1; then \
+		echo "Signed but not notarized: no usable '$(NOTARY)' keychain profile. See README, Signing."; \
+		exit 0; \
+	fi; \
+	image="$$(ls -t $(IMAGES)/$(APP)_*.dmg 2>/dev/null | head -1)"; \
+	upload="$$image"; \
+	if [ -z "$$image" ]; then \
+		upload="$$(mktemp -d)/$(APP).zip"; \
+		ditto -c -k --keepParent "$(BUNDLE)" "$$upload"; \
+	fi; \
+	xcrun notarytool submit "$$upload" --keychain-profile "$(NOTARY)" --wait \
+		| tee /dev/stderr | grep -q "status: Accepted" || { \
+		echo "Apple did not accept it. 'xcrun notarytool log <id> --keychain-profile $(NOTARY)' says why."; \
+		exit 1; \
+	}; \
+	{ [ -z "$$image" ] || xcrun stapler staple "$$image"; } && xcrun stapler staple "$(BUNDLE)"
+endif
+
+# The grant is only as stable as the signature under it, so it is cleared
+# whenever an install changes who signed the app — ad-hoc to signed, one team
+# to another — and on every ad-hoc install, where each build is its own
+# signer. Between two builds signed by the same certificate it is left alone,
+# which is the whole point of signing them.
 install:
-	rm -rf /Applications/$(APP).app
-	cp -R $(BUNDLE) /Applications/$(APP).app
+	@old="$$(codesign -dv "$(INSTALLED)" 2>&1 | sed -n 's/^TeamIdentifier=//p')"; \
+	new="$$(codesign -dv "$(BUNDLE)" 2>&1 | sed -n 's/^TeamIdentifier=//p')"; \
+	case "$$new" in \
+		""|"not set") $(MAKE) reset-permissions ;; \
+		*) [ "$$old" = "$$new" ] || $(MAKE) reset-permissions ;; \
+	esac
+	rm -rf "$(INSTALLED)"
+	cp -R "$(BUNDLE)" "$(INSTALLED)"
 
 update: all
 
@@ -26,16 +91,30 @@ update: all
 stop:
 	-pkill -x reze
 
-# macOS ties the Accessibility grant to the binary's signature, so every
-# ad-hoc rebuild invalidates it while the entry keeps looking ticked in
-# System Settings — which also caches the TCC table, hence the quit first.
+# Forget every permission macOS holds for Reze, so the next launch asks afresh.
+# A grant given to an earlier signature keeps looking ticked in System Settings
+# while doing nothing — which also caches the list, hence the quit first.
 reset-permissions:
 	-osascript -e 'quit app "System Settings"'
-	-tccutil reset Accessibility $(BUNDLE_ID)
-	rm -rf /Applications/$(APP).app
+	-tccutil reset All $(BUNDLE_ID)
 
 launch:
-	open /Applications/$(APP).app
+	open "$(INSTALLED)"
+
+# Say how the next build will be signed, and what is missing if anything is.
+signing:
+ifeq ($(IDENTITY),)
+	@echo "Signing:    ad-hoc. No Developer ID Application certificate in the keychain,"
+	@echo "            so macOS will ask for Accessibility again after every build."
+else
+	@echo "Signing:    $(IDENTITY)"
+	@if xcrun notarytool history --keychain-profile "$(NOTARY)" >/dev/null 2>&1; then \
+		echo "Notarizing: with the '$(NOTARY)' keychain profile"; \
+	else \
+		echo "Notarizing: no. Nothing usable is stored as '$(NOTARY)' — see README, Signing."; \
+	fi
+endif
+	@echo "Installed:  $$(codesign -dv "$(INSTALLED)" 2>&1 | sed -n 's/^TeamIdentifier=//p' | sed 's/^not set$$/ad-hoc/;s/^$$/nothing/')"
 
 else
 
