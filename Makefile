@@ -1,5 +1,5 @@
 APP       := Reze
-BUNDLE_ID := com.huiyunlee.reze
+BUNDLE_ID := com.justin06lee.reze
 UNAME     := $(shell uname -s)
 
 .PHONY: all build notarize install update stop reset-permissions launch signing
@@ -73,7 +73,17 @@ endif
 # to another — and on every ad-hoc install, where each build is its own
 # signer. Between two builds signed by the same certificate it is left alone,
 # which is the whole point of signing them.
+#
+# An app that was installed under another bundle identifier is a different
+# app to macOS altogether. What was granted to that name is cleared with it,
+# rather than left behind as an entry for something that no longer exists —
+# and while it is still installed, since that is the only time macOS will
+# look the name up.
 install:
+	@was="$$(defaults read "$(INSTALLED)/Contents/Info" CFBundleIdentifier 2>/dev/null)"; \
+	if [ -n "$$was" ] && [ "$$was" != "$(BUNDLE_ID)" ]; then \
+		$(MAKE) reset-permissions BUNDLE_ID="$$was"; \
+	fi
 	@old="$$(codesign -dv "$(INSTALLED)" 2>&1 | sed -n 's/^TeamIdentifier=//p')"; \
 	new="$$(codesign -dv "$(BUNDLE)" 2>&1 | sed -n 's/^TeamIdentifier=//p')"; \
 	case "$$new" in \
