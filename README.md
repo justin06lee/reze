@@ -192,6 +192,19 @@ changed in Settings.
 
 ## Using it
 
+Open Reze and a window opens — the first time on a short welcome: the three
+keys that reach it, the Accessibility permission, your other machines if
+Tailscale is running (with sync ticked for you when one of them already
+syncs), and whether to start at login. After that the same window is the macro
+editor. Nothing in the welcome is saved until its last button, and **Settings →
+Welcome** shows it again.
+
+Close the window and Reze goes on running in the menu bar. While the window is
+open Reze is an ordinary app: in the Dock and the ⌘Tab switcher, so a window
+you clicked away from is one you can get back to. Closed, it leaves both.
+Opening Reze again — from the Dock, Launchpad or Finder — brings the window
+back; started at login, it stays out of the way.
+
 There are two ways in. **Search** it when you want to browse, or **expand in
 place** when you already know the trigger.
 
@@ -252,7 +265,8 @@ change how expansions are delivered, and set Reze to start at login.
 
 Use **Quit Reze** in the tray menu, or `⌘Q` with the editor focused. A menu-bar
 app has no application menu, so `⌘Q` has nothing to hang off by default — the
-editor window handles it itself. `⌘W` there closes the window without quitting.
+editor window handles it itself. `⌘W` there closes the window without quitting,
+the same as its close button.
 
 ## Attachments
 
@@ -562,7 +576,8 @@ to have it on every machine you use, [switch sync on](#keeping-them-in-sync).
     "clipboardHistory": true,    // remember what you copy
     "clipboardLimit": 200,
     "shareOverTailscale": true,  // let your other machines import this
-    "sync": false                // keep it the same as theirs — see Other devices
+    "sync": false,               // keep it the same as theirs — see Other devices
+    "onboarded": true            // false shows the welcome again
   },
   "macros": [
     {
@@ -815,6 +830,7 @@ bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/b
 - `src/lib/fuzzy.ts` — the palette's ranking
 - `src/Attachments.tsx` — attachment previews, shared by both windows
 - `src/Palette.tsx`, `src/Editor.tsx` — the two windows, routed by window label
+- `src/Onboarding.tsx` — the welcome the editor opens on the first time
 
 Both windows load the same bundle; `main.tsx` picks a component from
 `getCurrentWindow().label`.

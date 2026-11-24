@@ -43,6 +43,8 @@ export const hidePalette = () => invoke<void>("hide_palette");
 /** Show without resetting — used when an in-place expansion needs values. */
 export const showPalette = () => invoke<void>("show_palette");
 export const openEditor = () => invoke<void>("open_editor");
+/** Close the editor the way its close button does: hidden, and out of the Dock. */
+export const closeEditor = () => invoke<void>("close_editor");
 /** Keep the hotkeys in step when the window changes mode by itself. */
 export const setPaletteMode = (clipboard: boolean) =>
   invoke<void>("set_palette_mode", { clipboard });

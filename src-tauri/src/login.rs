@@ -51,6 +51,45 @@ mod imp {
             .unwrap_or(false)
     }
 
+    /// Whether this launch was macOS starting a login item, not a person
+    /// opening the app.
+    ///
+    /// The launch itself says so: the "open application" event that started
+    /// the process carries a mark when it came from the login items. It is
+    /// only there to be read while the app is still finishing launching.
+    pub fn launched_at_login() -> bool {
+        use objc2::runtime::AnyObject;
+        use objc2::{class, msg_send};
+        const fn code(name: &[u8; 4]) -> u32 {
+            u32::from_be_bytes(*name)
+        }
+        // kAEOpenApplication, keyAEPropData, keyAELaunchedAsLogInItem.
+        const OPEN: u32 = code(b"oapp");
+        const HOW: u32 = code(b"prdt");
+        const AT_LOGIN: u32 = code(b"lgit");
+        unsafe {
+            let manager: *mut AnyObject =
+                msg_send![class!(NSAppleEventManager), sharedAppleEventManager];
+            if manager.is_null() {
+                return false;
+            }
+            let event: *mut AnyObject = msg_send![manager, currentAppleEvent];
+            if event.is_null() {
+                return false;
+            }
+            let id: u32 = msg_send![event, eventID];
+            if id != OPEN {
+                return false;
+            }
+            let how: *mut AnyObject = msg_send![event, paramDescriptorForKeyword: HOW];
+            if how.is_null() {
+                return false;
+            }
+            let how: u32 = msg_send![how, enumCodeValue];
+            how == AT_LOGIN
+        }
+    }
+
     pub fn status() -> LoginItem {
         if !available() || !is_bundled() {
             return LoginItem::Unsupported;
@@ -149,6 +188,16 @@ mod imp {
         })
     }
 
+    /// Whether the session started this, not a person: the autostart entry
+    /// says so itself, with [`AT_LOGIN`] on its command line.
+    pub fn launched_at_login() -> bool {
+        std::env::args().any(|arg| arg == AT_LOGIN)
+    }
+
+    /// What the autostart entry adds to the command, so that a Reze started
+    /// with the session can tell it was not asked for by anyone.
+    const AT_LOGIN: &str = "--at-login";
+
     pub fn status() -> LoginItem {
         if installed_exe().is_none() {
             return LoginItem::Unsupported;
@@ -186,7 +235,7 @@ mod imp {
              Type=Application\n\
              Name=Reze\n\
              Comment=Turn short triggers into full prompts\n\
-             Exec=\"{quoted}\"\n\
+             Exec=\"{quoted}\" {AT_LOGIN}\n\
              Icon=reze\n\
              Terminal=false\n\
              X-GNOME-Autostart-enabled=true\n"
@@ -227,6 +276,10 @@ mod imp {
     }
 
     pub fn open_settings() {}
+
+    pub fn launched_at_login() -> bool {
+        false
+    }
 }
 
-pub use imp::{open_settings, set, status};
+pub use imp::{launched_at_login, open_settings, set, status};
