@@ -25,3 +25,13 @@ assets/icon-1024.png
 *.njsproj
 *.sln
 *.sw?
+
+# The phone app: SwiftPM build output, and the Xcode project `make ios` generates
+ios/RezeKit/.build
+ios/RezeKit/.swiftpm
+ios/Reze.xcodeproj
+ios/App/Info.plist
+ios/App/Reze.entitlements
+ios/Keyboard/Info.plist
+ios/Keyboard/RezeKeyboard.entitlements
+ios/shots

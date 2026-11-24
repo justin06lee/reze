@@ -18,6 +18,10 @@ at login. Where Linux differs — mostly the hotkeys — it says so, and
 synthetic input into other applications by design, which is the mechanism this
 whole app rests on.
 
+There is the start of an iPhone app and keyboard too, which read the library
+from one of your Macs — written and tested as far as a Mac can test it, not
+yet run on a phone. See [On the phone](#on-the-phone).
+
 Hit a global hotkey anywhere, type `full analysis`, press Enter — the paragraph
 you actually meant gets pasted into whatever app you were already in.
 
@@ -768,6 +772,169 @@ It is plain HTTP inside the tunnel, so `curl http://tenet:7393/reze` shows what
 another Reze would see — including whether sync is on there, and a `revision`
 that is the same on two machines exactly when their libraries are.
 
+## On the phone
+
+`ios/` holds an iPhone app and a keyboard that bring the library on one of
+your Macs to your phone, over Tailscale.
+
+> **Where this stands.** Everything the app and the keyboard *do* — reading a
+> Mac's library, the template language, search, fetching and keeping the
+> files, what the keyboard does to a text field — is in a Swift package that
+> is built and tested on a Mac (`make ios-test`), and has fetched a real
+> library from a real Mac. The app itself has **never been built for a phone
+> or run on one**: about a hundred lines exist only on iOS (the keyboard's
+> view controller, the app's entry point, the iOS half of the clipboard code)
+> and no compiler has seen them yet. Expect to fix something the first time
+> it is opened in Xcode. [What has not been tried](#what-has-not-been-tried)
+> lists what to check.
+
+### What it does
+
+- **The app** asks once which Mac to fetch from — by the name or `100.x.y.z`
+  address that Mac's **Settings → Other devices** shows — and keeps a copy of
+  its macros and their attachments. Search it the way the palette searches;
+  tap a macro and it is on the clipboard, text and pictures both, to paste
+  wherever you were. A macro with `{{variables}}` asks for them first. Each
+  time the app is opened it looks at the Mac again and takes what changed.
+- **The keyboard** shows the same macros and types the one you tap, in any
+  app. Type a macro's name with your usual keyboard, switch to Reze's, and it
+  offers to replace the name with the macro — expand in place, on a phone.
+  A macro that is a picture or a video cannot be typed, so the keyboard puts
+  it on the clipboard and says to paste.
+- **The Mac's clipboard**, when [clipboard sharing](#sharing-it-between-machines)
+  is on there: one row at the top of the list copies whatever was last copied
+  on the Mac, text or image.
+
+The phone only reads. The Mac is asked for things with the same requests
+another Mac would make — see [What is listening](#what-is-listening) — and it
+answers the phone for the same reason it answers them: it is signed in to
+Tailscale as you. Nothing done on the phone changes the Mac.
+
+### What a phone will not let it do
+
+These are iOS's rules, not things left for later:
+
+- **No watching the clipboard.** An app may read the clipboard only while it
+  is on screen, and asks permission to. So what you copy on the Mac does not
+  appear on the phone by itself; it arrives when you ask for it. And what you
+  copy on the phone is not sent to the Mac at all: besides the watching, that
+  would need a request that changes something on the Mac, and its listener
+  has none on purpose.
+- **No syncing in the background.** A phone gives an app a few seconds now
+  and then, on its own schedule. The copy is brought up to date when the app
+  is opened, not when the Mac changes.
+- **A keyboard is kept from almost everything** until its **Allow Full
+  Access** switch is turned on in Settings. Reze's keyboard never uses the
+  network either way — it reads the copy the app keeps. Full Access is what
+  lets it put a picture on the clipboard, and read the clipboard for
+  `{{clipboard}}`.
+- **A keyboard has only its own keys to type with**, so it cannot ask for a
+  macro's variables: each takes its default, and one with no default is left
+  empty. Use the app for those.
+- **Editing is on the Mac.** The phone has no way to send a change back.
+
+### Building it
+
+Needs a Mac with Xcode, [xcodegen](https://github.com/yonaskolb/XcodeGen)
+(`brew install xcodegen`) and an Apple Developer account. Xcode has to be the
+selected toolchain and its licence agreed to, once:
+
+```bash
+sudo xcode-select -s /Applications/Xcode.app
+sudo xcodebuild -license
+```
+
+Then:
+
+```bash
+make ios        # run the tests, write ios/Reze.xcodeproj, open it
+```
+
+In Xcode, plug in the phone, pick it at the top of the window and press Run.
+The first build makes the signing certificate, the two app identifiers and the
+App Group for you (the project asks for automatic signing with the team in
+`ios/project.yml` — change `DEVELOPMENT_TEAM` there if it is not yours).
+
+On the phone, install [Tailscale](https://tailscale.com/download/ios), sign in
+as the same person as the Mac, and leave it connected. Then open Reze and type
+the Mac's name. For the keyboard: **Settings → General → Keyboard → Keyboards →
+Add New Keyboard → Reze**, then tap it in that list to allow Full Access if
+you want pictures.
+
+The Xcode project is not kept in git — `ios/project.yml` is, and is the place
+to change targets, identifiers and permissions. Two things in it are worth
+knowing about:
+
+- **Plain HTTP is allowed** (`NSAllowsArbitraryLoads`). A Mac's Reze speaks
+  plain HTTP inside the tailnet, where Tailscale does the encrypting, and may
+  be named by an address, a bare name or a full MagicDNS name, so there is no
+  one domain to make the exception for. The app talks to the one machine you
+  typed into it.
+- **An App Group**, `group.com.justin06lee.reze`, is how the app hands the
+  library to the keyboard. The same name is `Shelf.group` in the package.
+
+### Working on it without a phone
+
+```bash
+make ios-test                    # every test, on this Mac
+REZE_LIVE=mac-mini make ios-test # and fetch from a real Mac, read-only
+make ios-shots                   # draw the screens to ios/shots/*.png
+make ios-shots MAC=mac-mini      # …with a real Mac's library in them
+make ios-fixtures                # after changing template.ts or fuzzy.ts
+```
+
+- `ios/RezeKit/Sources/RezeKit` — no interface at all: the library as a Mac
+  hands it over (`Models`), the template language (`Template`), search and
+  typed-trigger matching (`Search`), the requests (`Client`), and the copy
+  kept on the phone (`Shelf`).
+- `ios/RezeKit/Sources/RezeUI` — every screen, and the keyboard's panel and
+  what it does (`Keyboard`), in SwiftUI. It builds for macOS too, which is
+  what lets the tests run and the screens be drawn here.
+- `ios/App`, `ios/Keyboard` — the two targets, each a few lines that put
+  RezeUI on screen.
+
+The template language and the fuzzy match exist twice, in TypeScript for the
+desktop and in Swift for the phone. `make ios-fixtures` runs the desktop's own
+code over a set of inputs and writes down what it made of them; the Swift
+tests hold the ports to that file. Change `src/lib/template.ts` or
+`src/lib/fuzzy.ts`, run it, and a port that has fallen behind fails.
+
+`make ios-shots` draws SwiftUI for macOS at a phone's size, without opening a
+window. The layout, text and colours are the app's; navigation bars, the
+search field and list styling are macOS's, so it shows whether a screen holds
+together, not exactly how iOS draws it.
+
+With only the Command Line Tools selected, the Makefile builds the package
+against the macOS 26 SDK the tools keep alongside the current one: since the
+macOS 27 SDK, SwiftUI's `@State` is a compiler macro whose plugin ships only
+inside Xcode. It also names the testing macros' plugin outright, which those
+tools otherwise find on some builds and not on others. With Xcode selected
+nothing is overridden.
+
+### What has not been tried
+
+Nothing here has run on a phone. In the order worth checking:
+
+1. **That it compiles.** `ios/App/RezeApp.swift`,
+   `ios/Keyboard/KeyboardViewController.swift`, the `UIKit` branch of
+   `RezeUI/Clipboard.swift` and the few `#if os(iOS)` modifiers.
+2. **That the Mac answers the phone.** It should: the phone is one of your
+   devices as far as `tailscale whois` is concerned. If the app says the Mac
+   only answers your own devices, the phone is signed in to Tailscale as
+   someone else.
+3. **That the keyboard can read the library without Full Access.** iOS
+   documents the shared container as needing it, and in practice lets a
+   keyboard read one without. If the keyboard says there are no macros after
+   the app has fetched them, turn Full Access on.
+4. **Pasting a picture or a video.** They go on the clipboard under the type
+   the Mac recorded (`image/png`, `video/mp4`, …); whether a given app takes a
+   paste of that type is up to the app.
+5. **A macro with both text and attachments, copied from the app**, goes on
+   the clipboard as separate items. Some apps paste all of them, some only
+   the first.
+6. **Replacing a typed name** deletes one character per character of the
+   name. Names with emoji in them are where that count could be off.
+
 ## Typing awareness
 
 Expanding in a terminal requires knowing what you typed, and nothing can be
@@ -855,6 +1022,7 @@ bun run tauri build    # produce Reze.app + a .dmg in src-tauri/target/release/b
 - `src/Attachments.tsx` — attachment previews, shared by both windows
 - `src/Palette.tsx`, `src/Editor.tsx` — the two windows, routed by window label
 - `src/Onboarding.tsx` — the welcome the editor opens on the first time
+- `ios/` — the phone app and its keyboard, in Swift; see [On the phone](#on-the-phone) (`make ios-test`)
 
 Both windows load the same bundle; `main.tsx` picks a component from
 `getCurrentWindow().label`.
@@ -869,6 +1037,7 @@ the app's premise: pull a tiny pin, get an explosion.
 | --- | --- | --- |
 | `assets/icon.svg` | `src-tauri/icons/*` incl. `icon.icns`, `icon.ico` | Authored at 1024² with the macOS icon grid baked in (824² body, 100px margin), so generation only ever downscales. |
 | `assets/tray.svg` | `src-tauri/icons/tray.png` | The menu-bar glyph. |
+| `src-tauri/icons/icon.icns` | `ios/App/Assets.xcassets/AppIcon.appiconset/icon-1024.png` | The phone's icon: the same picture with the margin cut off and nothing see-through, since iOS rounds the corners itself. `make ios-icon`, after `bun run icons`. |
 
 Regenerate both after editing either SVG (needs `rsvg-convert` — `brew install librsvg`):
 
