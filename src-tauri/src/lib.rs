@@ -718,6 +718,15 @@ fn open_editor(app: AppHandle) {
     show_editor(&app);
 }
 
+/// Close the editor from inside it — ⌘W — the way its close button does.
+#[tauri::command]
+fn close_editor(app: AppHandle) {
+    if let Some(win) = app.get_webview_window(EDITOR) {
+        let _ = win.hide();
+    }
+    editor_closed(&app);
+}
+
 /// Tell the backend the window switched between the macro list and the
 /// clipboard on its own, so the next hotkey press still knows whether it means
 /// "open the other one" or "close this".
@@ -889,12 +898,30 @@ fn reveal_on_linux(path: &std::path::Path) {
 
 // ---------------------------------------------------------------- windows
 
+/// Bring the editor up, and with it Reze as an app like any other.
+///
+/// Most of the time Reze is a menu-bar app: no Dock icon, not in the ⌘Tab
+/// switcher. A window belonging to an app like that cannot be found again
+/// once another app is clicked — it is still open, behind everything, with
+/// nothing on screen that leads back to it, which reads exactly like having
+/// closed itself. So for as long as the editor is open, Reze is in the Dock
+/// and the switcher; [`editor_closed`] takes it back out.
 fn show_editor(app: &AppHandle) {
     if let Some(win) = app.get_webview_window(EDITOR) {
+        #[cfg(target_os = "macos")]
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
     }
+}
+
+/// The editor was closed: back to living in the menu bar alone.
+fn editor_closed(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
 }
 
 /// Centre the palette horizontally on whichever display the cursor is on, so it
@@ -1384,6 +1411,7 @@ pub fn run() {
             hide_palette,
             show_palette,
             open_editor,
+            close_editor,
             quit,
             resize_palette,
             set_hotkeys,
@@ -1528,6 +1556,15 @@ pub fn run() {
             tailnet::configure(&lib.settings);
             tailnet::start(handle.clone());
 
+            // Opened by a person, the app opens: a window, on the welcome the
+            // first time and on the macros after that. Started with the
+            // session it stays out of the way, in the menu bar — unless it
+            // has never been set up, and then there is nothing else to show
+            // that it is there at all.
+            if !login::launched_at_login() || !lib.settings.onboarded {
+                show_editor(&handle);
+            }
+
             spawn_watcher(handle);
             Ok(())
         })
@@ -1544,13 +1581,16 @@ pub fn run() {
             WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
                 let _ = window.hide();
+                if window.label() == EDITOR {
+                    editor_closed(window.app_handle());
+                }
             }
             _ => {}
         })
         .build(tauri::generate_context!())
         .expect("error while building reze")
-        .run(|_app, event| {
-            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+        .run(|app, event| match event {
+            tauri::RunEvent::ExitRequested { code, api, .. } => {
                 // A menu-bar app must survive its last window closing, which is
                 // what this guard is for. But `code` is Some only when the exit
                 // was asked for programmatically — i.e. the Quit menu item —
@@ -1558,6 +1598,13 @@ pub fn run() {
                 if code.is_none() {
                     api.prevent_exit();
                 }
+            }
+            // Opened again while already running — from the Dock, Launchpad
+            // or Finder. The app is asked for, so the app is what appears.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => show_editor(app),
+            _ => {
+                let _ = app;
             }
         });
 }

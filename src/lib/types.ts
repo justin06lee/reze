@@ -75,6 +75,8 @@ export type Settings = {
   shareOverTailscale: boolean;
   /** Keep this library the same as your other machines that have this on too. */
   sync: boolean;
+  /** Whether the welcome has been gone through on this machine. */
+  onboarded: boolean;
 };
 
 export type Library = {

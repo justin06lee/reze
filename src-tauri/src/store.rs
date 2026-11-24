@@ -89,6 +89,10 @@ pub struct Settings {
     /// one setting that lets another machine change what is here.
     #[serde(default)]
     pub sync: bool,
+    /// Whether the welcome has been gone through on this machine. Until it
+    /// has, the editor opens on it instead of on the macros.
+    #[serde(default)]
+    pub onboarded: bool,
 }
 
 /// Seeded rather than left empty so grabbing works the moment it is pressed,
@@ -147,6 +151,7 @@ impl Default for Settings {
             clipboard_limit: crate::history::default_limit(),
             share_over_tailscale: true,
             sync: false,
+            onboarded: false,
         }
     }
 }

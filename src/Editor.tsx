@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "./lib/api";
 import { AttachmentMedia, AttachmentTile, ClipIcon } from "./Attachments";
+import Onboarding from "./Onboarding";
 import { accelerator, isModifierOnly, prettyHotkey } from "./lib/hotkey";
 import { BUILTINS, collectVariables, expandIncludes } from "./lib/template";
 import { useLibrary } from "./lib/useLibrary";
@@ -438,7 +438,7 @@ export default function Editor() {
         api.quit();
       } else if (e.key === "w") {
         e.preventDefault();
-        getCurrentWindow().hide();
+        api.closeEditor();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -468,6 +468,18 @@ export default function Editor() {
     return (
       <div className="e-loading">
         <span>{error ?? "Loading…"}</span>
+      </div>
+    );
+  }
+
+  // Not set up on this machine yet: the welcome, in place of everything else.
+  if (!library.settings.onboarded) {
+    return (
+      <div className="editor">
+        <header className="e-titlebar" data-tauri-drag-region>
+          <span className="e-brand">Reze</span>
+        </header>
+        <Onboarding library={library} update={update} />
       </div>
     );
   }
@@ -953,6 +965,16 @@ function SettingsPane({
         <div className="e-row">
           <code className="e-path">{path}</code>
           <button onClick={() => api.revealLibrary()}>{REVEAL}</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Welcome</h2>
+        <p>The tour this window opened on the first time: the keys, the permission, your other machines.</p>
+        <div className="e-row">
+          <button onClick={() => update({ ...library, settings: { ...s, onboarded: false } })}>
+            Show it again
+          </button>
         </div>
       </section>
     </div>
