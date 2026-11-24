@@ -1,0 +1,1299 @@
+{
+  "macros": [
+    {
+      "id": "greeting",
+      "name": "greeting",
+      "description": "",
+      "tags": [],
+      "body": "Hello {{name|there}}, it is {{date}}.",
+      "attachments": [],
+      "usageCount": 0
+    },
+    {
+      "id": "Sign Off",
+      "name": "Sign Off",
+      "description": "",
+      "tags": [],
+      "body": "— {{author|me}}",
+      "attachments": [],
+      "usageCount": 0
+    },
+    {
+      "id": "letter",
+      "name": "letter",
+      "description": "",
+      "tags": [],
+      "body": "{{> greeting}}\n\n{{body}}\n\n{{>sign off}}",
+      "attachments": [],
+      "usageCount": 0
+    },
+    {
+      "id": "loop a",
+      "name": "loop a",
+      "description": "",
+      "tags": [],
+      "body": "a then {{> loop b}}",
+      "attachments": [],
+      "usageCount": 0
+    },
+    {
+      "id": "loop b",
+      "name": "loop b",
+      "description": "",
+      "tags": [],
+      "body": "b then {{> loop a}}",
+      "attachments": [],
+      "usageCount": 0
+    },
+    {
+      "id": "self",
+      "name": "self",
+      "description": "",
+      "tags": [],
+      "body": "again: {{> self}}",
+      "attachments": [],
+      "usageCount": 0
+    },
+    {
+      "id": "lost",
+      "name": "lost",
+      "description": "",
+      "tags": [],
+      "body": "see {{> nowhere }} and {{>  Sign Off  }}",
+      "attachments": [],
+      "usageCount": 0
+    }
+  ],
+  "values": [
+    {},
+    {
+      "name": "Justin",
+      "body": "The middle.",
+      "author": ""
+    },
+    {
+      "name": "",
+      "topic": "x",
+      "who": "you",
+      "誰": "私",
+      "triple": "3",
+      "clipboard": "copied",
+      "date": "D",
+      "time": "T",
+      "datetime": "DT"
+    }
+  ],
+  "template": [
+    {
+      "body": "plain text, nothing to do",
+      "expanded": {
+        "text": "plain text, nothing to do",
+        "missing": [],
+        "cyclic": []
+      },
+      "variables": [],
+      "builtins": [],
+      "rendered": [
+        "plain text, nothing to do",
+        "plain text, nothing to do",
+        "plain text, nothing to do"
+      ]
+    },
+    {
+      "body": "{{name}} and {{ name | spaced default }} and {{name|second default}}",
+      "expanded": {
+        "text": "{{name}} and {{ name | spaced default }} and {{name|second default}}",
+        "missing": [],
+        "cyclic": []
+      },
+      "variables": [
+        {
+          "name": "name",
+          "default": ""
+        }
+      ],
+      "builtins": [],
+      "rendered": [
+        " and spaced default and second default",
+        "Justin and Justin and Justin",
+        " and spaced default and second default"
+      ]
+    },
+    {
+      "body": "{{topic|a|b}} keeps everything after the first pipe",
+      "expanded": {
+        "text": "{{topic|a|b}} keeps everything after the first pipe",
+        "missing": [],
+        "cyclic": []
+      },
+      "variables": [
+        {
+          "name": "topic",
+          "default": "a|b"
+        }
+      ],
+      "builtins": [],
+      "rendered": [
+        "a|b keeps everything after the first pipe",
+        "a|b keeps everything after the first pipe",
+        "x keeps everything after the first pipe"
+      ]
+    },
+    {
+      "body": "{{clipboard}} {{date}} {{time}} {{datetime}} {{ clipboard }}",
+      "expanded": {
+        "text": "{{clipboard}} {{date}} {{time}} {{datetime}} {{ clipboard }}",
+        "missing": [],
+        "cyclic": []
+      },
+      "variables": [],
+      "builtins": [
+        "clipboard",
+        "date",
+        "time",
+        "datetime"
+      ],
+      "rendered": [
+        "    ",
+        "    ",
+        "copied D T DT copied"
+      ]
+    },
+    {
+      "body": "{{}} {{ }} {{! a note }} {{> greeting}}",
+      "expanded": {
+        "text": "{{}} {{ }} {{! a note }} Hello {{name|there}}, it is {{date}}.",
+        "missing": [],
+        "cyclic": []
+      },
+      "variables": [
+        {
+          "name": "name",
+          "default": "there"
+        }
+      ],
+      "builtins": [
+        "date"
+      ],
+      "rendered": [
+        "{{}} {{ }} {{! a note }} Hello there, it is .",
+        "{{}} {{ }} {{! a note }} Hello Justin, it is .",
+        "{{}} {{ }} {{! a note }} Hello there, it is D."
+      ]
+    },
+    {
+      "body": "{{{triple}}} and {{un closed and }} stray braces {",
+      "expanded": {
+        "text": "{{{triple}}} and {{un closed and }} stray braces {",
+        "missing": [],
+        "cyclic": []
+      },
+      "variables": [
+        {
+          "name": "triple",
+          "default": ""
+        },
+        {
+          "name": "un closed and",
+          "default": ""
+        }
+      ],
+      "builtins": [],
+      "rendered": [
+        "{} and  stray braces {",
+        "{} and  stray braces {",
+        "{3} and  stray braces {"
+      ]
+    },
+    {
+      "body": "{{multi\nline|with a\nbreak}}",
+      "expanded": {
+        "text": "{{multi\nline|with a\nbreak}}",
+        "missing": [],
+        "cyclic": []
+      },
+      "variables": [
+        {
+          "name": "multi\nline",
+          "default": "with a\nbreak"
+        }
+      ],
+      "builtins": [],
+      "rendered": [
+        "with a\nbreak",
+        "with a\nbreak",
+        "with a\nbreak"
+      ]
+    },
+    {
+      "body": "{{|only a default}} {{name|}}",
+      "expanded": {
+        "text": "{{|only a default}} {{name|}}",
+        "missing": [],
+        "cyclic": []
+      },
+      "variables": [
+        {
+          "name": "name",
+          "default": ""
+        }
+      ],
+      "builtins": [],
+      "rendered": [
+        "only a default ",
+        "only a default Justin",
+        "only a default "
+      ]
+    },
+    {
+      "body": "émoji 🎉 {{who|wörld}} 日本語 {{誰}}",
+      "expanded": {
+        "text": "émoji 🎉 {{who|wörld}} 日本語 {{誰}}",
+        "missing": [],
+        "cyclic": []
+      },
+      "variables": [
+        {
+          "name": "who",
+          "default": "wörld"
+        },
+        {
+          "name": "誰",
+          "default": ""
+        }
+      ],
+      "builtins": [],
+      "rendered": [
+        "émoji 🎉 wörld 日本語 ",
+        "émoji 🎉 wörld 日本語 ",
+        "émoji 🎉 you 日本語 私"
+      ]
+    },
+    {
+      "body": "{{> letter}}",
+      "expanded": {
+        "text": "Hello {{name|there}}, it is {{date}}.\n\n{{body}}\n\n— {{author|me}}",
+        "missing": [],
+        "cyclic": []
+      },
+      "variables": [
+        {
+          "name": "name",
+          "default": "there"
+        },
+        {
+          "name": "body",
+          "default": ""
+        },
+        {
+          "name": "author",
+          "default": "me"
+        }
+      ],
+      "builtins": [
+        "date"
+      ],
+      "rendered": [
+        "Hello there, it is .\n\n\n\n— me",
+        "Hello Justin, it is .\n\nThe middle.\n\n— me",
+        "Hello there, it is D.\n\n\n\n— me"
+      ]
+    },
+    {
+      "body": "{{> loop a}}",
+      "expanded": {
+        "text": "a then b then {{! cycle: loop a }}",
+        "missing": [],
+        "cyclic": [
+          "loop a"
+        ]
+      },
+      "variables": [],
+      "builtins": [],
+      "rendered": [
+        "a then b then {{! cycle: loop a }}",
+        "a then b then {{! cycle: loop a }}",
+        "a then b then {{! cycle: loop a }}"
+      ]
+    },
+    {
+      "body": "{{> self}}",
+      "expanded": {
+        "text": "again: {{! cycle: self }}",
+        "missing": [],
+        "cyclic": [
+          "self"
+        ]
+      },
+      "variables": [],
+      "builtins": [],
+      "rendered": [
+        "again: {{! cycle: self }}",
+        "again: {{! cycle: self }}",
+        "again: {{! cycle: self }}"
+      ]
+    },
+    {
+      "body": "{{> lost}}",
+      "expanded": {
+        "text": "see {{! missing: nowhere }} and — {{author|me}}",
+        "missing": [
+          "nowhere"
+        ],
+        "cyclic": []
+      },
+      "variables": [
+        {
+          "name": "author",
+          "default": "me"
+        }
+      ],
+      "builtins": [],
+      "rendered": [
+        "see {{! missing: nowhere }} and — me",
+        "see {{! missing: nowhere }} and — me",
+        "see {{! missing: nowhere }} and — me"
+      ]
+    },
+    {
+      "body": "{{>greeting}}{{>GREETING}}",
+      "expanded": {
+        "text": "Hello {{name|there}}, it is {{date}}.Hello {{name|there}}, it is {{date}}.",
+        "missing": [],
+        "cyclic": []
+      },
+      "variables": [
+        {
+          "name": "name",
+          "default": "there"
+        }
+      ],
+      "builtins": [
+        "date"
+      ],
+      "rendered": [
+        "Hello there, it is .Hello there, it is .",
+        "Hello Justin, it is .Hello Justin, it is .",
+        "Hello there, it is D.Hello there, it is D."
+      ]
+    }
+  ],
+  "fuzzy": [
+    {
+      "query": "",
+      "target": "full analysis",
+      "match": {
+        "score": 0,
+        "indices": []
+      }
+    },
+    {
+      "query": "",
+      "target": "refactor plan",
+      "match": {
+        "score": 0,
+        "indices": []
+      }
+    },
+    {
+      "query": "",
+      "target": "commit message",
+      "match": {
+        "score": 0,
+        "indices": []
+      }
+    },
+    {
+      "query": "",
+      "target": "fa",
+      "match": {
+        "score": 0,
+        "indices": []
+      }
+    },
+    {
+      "query": "",
+      "target": "Full-Analysis_v2",
+      "match": {
+        "score": 0,
+        "indices": []
+      }
+    },
+    {
+      "query": "",
+      "target": "a/b.c:d",
+      "match": {
+        "score": 0,
+        "indices": []
+      }
+    },
+    {
+      "query": "",
+      "target": "",
+      "match": {
+        "score": 0,
+        "indices": []
+      }
+    },
+    {
+      "query": "",
+      "target": "rigor",
+      "match": {
+        "score": 0,
+        "indices": []
+      }
+    },
+    {
+      "query": "",
+      "target": "FULL ANALYSIS",
+      "match": {
+        "score": 0,
+        "indices": []
+      }
+    },
+    {
+      "query": "fa",
+      "target": "full analysis",
+      "match": {
+        "score": 28.7,
+        "indices": [
+          0,
+          5
+        ]
+      }
+    },
+    {
+      "query": "fa",
+      "target": "refactor plan",
+      "match": {
+        "score": 21.7,
+        "indices": [
+          2,
+          3
+        ]
+      }
+    },
+    {
+      "query": "fa",
+      "target": "commit message",
+      "match": null
+    },
+    {
+      "query": "fa",
+      "target": "fa",
+      "match": {
+        "score": 89.8,
+        "indices": [
+          0,
+          1
+        ]
+      }
+    },
+    {
+      "query": "fa",
+      "target": "Full-Analysis_v2",
+      "match": {
+        "score": 28.4,
+        "indices": [
+          0,
+          5
+        ]
+      }
+    },
+    {
+      "query": "fa",
+      "target": "a/b.c:d",
+      "match": null
+    },
+    {
+      "query": "fa",
+      "target": "",
+      "match": null
+    },
+    {
+      "query": "fa",
+      "target": "rigor",
+      "match": null
+    },
+    {
+      "query": "fa",
+      "target": "FULL ANALYSIS",
+      "match": {
+        "score": 28.7,
+        "indices": [
+          0,
+          5
+        ]
+      }
+    },
+    {
+      "query": "full",
+      "target": "full analysis",
+      "match": {
+        "score": 78.7,
+        "indices": [
+          0,
+          1,
+          2,
+          3
+        ]
+      }
+    },
+    {
+      "query": "full",
+      "target": "refactor plan",
+      "match": null
+    },
+    {
+      "query": "full",
+      "target": "commit message",
+      "match": null
+    },
+    {
+      "query": "full",
+      "target": "fa",
+      "match": null
+    },
+    {
+      "query": "full",
+      "target": "Full-Analysis_v2",
+      "match": {
+        "score": 78.4,
+        "indices": [
+          0,
+          1,
+          2,
+          3
+        ]
+      }
+    },
+    {
+      "query": "full",
+      "target": "a/b.c:d",
+      "match": null
+    },
+    {
+      "query": "full",
+      "target": "",
+      "match": null
+    },
+    {
+      "query": "full",
+      "target": "rigor",
+      "match": null
+    },
+    {
+      "query": "full",
+      "target": "FULL ANALYSIS",
+      "match": {
+        "score": 78.7,
+        "indices": [
+          0,
+          1,
+          2,
+          3
+        ]
+      }
+    },
+    {
+      "query": "fu an",
+      "target": "full analysis",
+      "match": {
+        "score": 49.7,
+        "indices": [
+          0,
+          1,
+          5,
+          6
+        ]
+      }
+    },
+    {
+      "query": "fu an",
+      "target": "refactor plan",
+      "match": null
+    },
+    {
+      "query": "fu an",
+      "target": "commit message",
+      "match": null
+    },
+    {
+      "query": "fu an",
+      "target": "fa",
+      "match": null
+    },
+    {
+      "query": "fu an",
+      "target": "Full-Analysis_v2",
+      "match": {
+        "score": 49.4,
+        "indices": [
+          0,
+          1,
+          5,
+          6
+        ]
+      }
+    },
+    {
+      "query": "fu an",
+      "target": "a/b.c:d",
+      "match": null
+    },
+    {
+      "query": "fu an",
+      "target": "",
+      "match": null
+    },
+    {
+      "query": "fu an",
+      "target": "rigor",
+      "match": null
+    },
+    {
+      "query": "fu an",
+      "target": "FULL ANALYSIS",
+      "match": {
+        "score": 49.7,
+        "indices": [
+          0,
+          1,
+          5,
+          6
+        ]
+      }
+    },
+    {
+      "query": "full analysis",
+      "target": "full analysis",
+      "match": {
+        "score": 131.7,
+        "indices": [
+          0,
+          1,
+          2,
+          3,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12
+        ]
+      }
+    },
+    {
+      "query": "full analysis",
+      "target": "refactor plan",
+      "match": null
+    },
+    {
+      "query": "full analysis",
+      "target": "commit message",
+      "match": null
+    },
+    {
+      "query": "full analysis",
+      "target": "fa",
+      "match": null
+    },
+    {
+      "query": "full analysis",
+      "target": "Full-Analysis_v2",
+      "match": {
+        "score": 131.4,
+        "indices": [
+          0,
+          1,
+          2,
+          3,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12
+        ]
+      }
+    },
+    {
+      "query": "full analysis",
+      "target": "a/b.c:d",
+      "match": null
+    },
+    {
+      "query": "full analysis",
+      "target": "",
+      "match": null
+    },
+    {
+      "query": "full analysis",
+      "target": "rigor",
+      "match": null
+    },
+    {
+      "query": "full analysis",
+      "target": "FULL ANALYSIS",
+      "match": {
+        "score": 131.7,
+        "indices": [
+          0,
+          1,
+          2,
+          3,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12
+        ]
+      }
+    },
+    {
+      "query": "FA",
+      "target": "full analysis",
+      "match": {
+        "score": 28.7,
+        "indices": [
+          0,
+          5
+        ]
+      }
+    },
+    {
+      "query": "FA",
+      "target": "refactor plan",
+      "match": {
+        "score": 21.7,
+        "indices": [
+          2,
+          3
+        ]
+      }
+    },
+    {
+      "query": "FA",
+      "target": "commit message",
+      "match": null
+    },
+    {
+      "query": "FA",
+      "target": "fa",
+      "match": {
+        "score": 89.8,
+        "indices": [
+          0,
+          1
+        ]
+      }
+    },
+    {
+      "query": "FA",
+      "target": "Full-Analysis_v2",
+      "match": {
+        "score": 28.4,
+        "indices": [
+          0,
+          5
+        ]
+      }
+    },
+    {
+      "query": "FA",
+      "target": "a/b.c:d",
+      "match": null
+    },
+    {
+      "query": "FA",
+      "target": "",
+      "match": null
+    },
+    {
+      "query": "FA",
+      "target": "rigor",
+      "match": null
+    },
+    {
+      "query": "FA",
+      "target": "FULL ANALYSIS",
+      "match": {
+        "score": 28.7,
+        "indices": [
+          0,
+          5
+        ]
+      }
+    },
+    {
+      "query": "plan",
+      "target": "full analysis",
+      "match": null
+    },
+    {
+      "query": "plan",
+      "target": "refactor plan",
+      "match": {
+        "score": 51.7,
+        "indices": [
+          9,
+          10,
+          11,
+          12
+        ]
+      }
+    },
+    {
+      "query": "plan",
+      "target": "commit message",
+      "match": null
+    },
+    {
+      "query": "plan",
+      "target": "fa",
+      "match": null
+    },
+    {
+      "query": "plan",
+      "target": "Full-Analysis_v2",
+      "match": null
+    },
+    {
+      "query": "plan",
+      "target": "a/b.c:d",
+      "match": null
+    },
+    {
+      "query": "plan",
+      "target": "",
+      "match": null
+    },
+    {
+      "query": "plan",
+      "target": "rigor",
+      "match": null
+    },
+    {
+      "query": "plan",
+      "target": "FULL ANALYSIS",
+      "match": null
+    },
+    {
+      "query": "xyz",
+      "target": "full analysis",
+      "match": null
+    },
+    {
+      "query": "xyz",
+      "target": "refactor plan",
+      "match": null
+    },
+    {
+      "query": "xyz",
+      "target": "commit message",
+      "match": null
+    },
+    {
+      "query": "xyz",
+      "target": "fa",
+      "match": null
+    },
+    {
+      "query": "xyz",
+      "target": "Full-Analysis_v2",
+      "match": null
+    },
+    {
+      "query": "xyz",
+      "target": "a/b.c:d",
+      "match": null
+    },
+    {
+      "query": "xyz",
+      "target": "",
+      "match": null
+    },
+    {
+      "query": "xyz",
+      "target": "rigor",
+      "match": null
+    },
+    {
+      "query": "xyz",
+      "target": "FULL ANALYSIS",
+      "match": null
+    },
+    {
+      "query": "a",
+      "target": "full analysis",
+      "match": {
+        "score": 22.7,
+        "indices": [
+          5
+        ]
+      }
+    },
+    {
+      "query": "a",
+      "target": "refactor plan",
+      "match": {
+        "score": 10.7,
+        "indices": [
+          3
+        ]
+      }
+    },
+    {
+      "query": "a",
+      "target": "commit message",
+      "match": {
+        "score": 7.6,
+        "indices": [
+          11
+        ]
+      }
+    },
+    {
+      "query": "a",
+      "target": "fa",
+      "match": {
+        "score": 13.8,
+        "indices": [
+          1
+        ]
+      }
+    },
+    {
+      "query": "a",
+      "target": "Full-Analysis_v2",
+      "match": {
+        "score": 22.4,
+        "indices": [
+          5
+        ]
+      }
+    },
+    {
+      "query": "a",
+      "target": "a/b.c:d",
+      "match": {
+        "score": 49.3,
+        "indices": [
+          0
+        ]
+      }
+    },
+    {
+      "query": "a",
+      "target": "",
+      "match": null
+    },
+    {
+      "query": "a",
+      "target": "rigor",
+      "match": null
+    },
+    {
+      "query": "a",
+      "target": "FULL ANALYSIS",
+      "match": {
+        "score": 22.7,
+        "indices": [
+          5
+        ]
+      }
+    },
+    {
+      "query": "msg",
+      "target": "full analysis",
+      "match": null
+    },
+    {
+      "query": "msg",
+      "target": "refactor plan",
+      "match": null
+    },
+    {
+      "query": "msg",
+      "target": "commit message",
+      "match": {
+        "score": -11.4,
+        "indices": [
+          2,
+          9,
+          12
+        ]
+      }
+    },
+    {
+      "query": "msg",
+      "target": "fa",
+      "match": null
+    },
+    {
+      "query": "msg",
+      "target": "Full-Analysis_v2",
+      "match": null
+    },
+    {
+      "query": "msg",
+      "target": "a/b.c:d",
+      "match": null
+    },
+    {
+      "query": "msg",
+      "target": "",
+      "match": null
+    },
+    {
+      "query": "msg",
+      "target": "rigor",
+      "match": null
+    },
+    {
+      "query": "msg",
+      "target": "FULL ANALYSIS",
+      "match": null
+    },
+    {
+      "query": "f  a",
+      "target": "full analysis",
+      "match": {
+        "score": 28.7,
+        "indices": [
+          0,
+          5
+        ]
+      }
+    },
+    {
+      "query": "f  a",
+      "target": "refactor plan",
+      "match": {
+        "score": 21.7,
+        "indices": [
+          2,
+          3
+        ]
+      }
+    },
+    {
+      "query": "f  a",
+      "target": "commit message",
+      "match": null
+    },
+    {
+      "query": "f  a",
+      "target": "fa",
+      "match": {
+        "score": 89.8,
+        "indices": [
+          0,
+          1
+        ]
+      }
+    },
+    {
+      "query": "f  a",
+      "target": "Full-Analysis_v2",
+      "match": {
+        "score": 28.4,
+        "indices": [
+          0,
+          5
+        ]
+      }
+    },
+    {
+      "query": "f  a",
+      "target": "a/b.c:d",
+      "match": null
+    },
+    {
+      "query": "f  a",
+      "target": "",
+      "match": null
+    },
+    {
+      "query": "f  a",
+      "target": "rigor",
+      "match": null
+    },
+    {
+      "query": "f  a",
+      "target": "FULL ANALYSIS",
+      "match": {
+        "score": 28.7,
+        "indices": [
+          0,
+          5
+        ]
+      }
+    },
+    {
+      "query": "r",
+      "target": "full analysis",
+      "match": null
+    },
+    {
+      "query": "r",
+      "target": "refactor plan",
+      "match": {
+        "score": 48.7,
+        "indices": [
+          0
+        ]
+      }
+    },
+    {
+      "query": "r",
+      "target": "commit message",
+      "match": null
+    },
+    {
+      "query": "r",
+      "target": "fa",
+      "match": null
+    },
+    {
+      "query": "r",
+      "target": "Full-Analysis_v2",
+      "match": null
+    },
+    {
+      "query": "r",
+      "target": "a/b.c:d",
+      "match": null
+    },
+    {
+      "query": "r",
+      "target": "",
+      "match": null
+    },
+    {
+      "query": "r",
+      "target": "rigor",
+      "match": {
+        "score": 49.5,
+        "indices": [
+          0
+        ]
+      }
+    },
+    {
+      "query": "r",
+      "target": "FULL ANALYSIS",
+      "match": null
+    },
+    {
+      "query": "abcd",
+      "target": "full analysis",
+      "match": null
+    },
+    {
+      "query": "abcd",
+      "target": "refactor plan",
+      "match": null
+    },
+    {
+      "query": "abcd",
+      "target": "commit message",
+      "match": null
+    },
+    {
+      "query": "abcd",
+      "target": "fa",
+      "match": null
+    },
+    {
+      "query": "abcd",
+      "target": "Full-Analysis_v2",
+      "match": null
+    },
+    {
+      "query": "abcd",
+      "target": "a/b.c:d",
+      "match": {
+        "score": 58.3,
+        "indices": [
+          0,
+          2,
+          4,
+          6
+        ]
+      }
+    },
+    {
+      "query": "abcd",
+      "target": "",
+      "match": null
+    },
+    {
+      "query": "abcd",
+      "target": "rigor",
+      "match": null
+    },
+    {
+      "query": "abcd",
+      "target": "FULL ANALYSIS",
+      "match": null
+    },
+    {
+      "query": "-",
+      "target": "full analysis",
+      "match": null
+    },
+    {
+      "query": "-",
+      "target": "refactor plan",
+      "match": null
+    },
+    {
+      "query": "-",
+      "target": "commit message",
+      "match": null
+    },
+    {
+      "query": "-",
+      "target": "fa",
+      "match": null
+    },
+    {
+      "query": "-",
+      "target": "Full-Analysis_v2",
+      "match": {
+        "score": 9.4,
+        "indices": [
+          4
+        ]
+      }
+    },
+    {
+      "query": "-",
+      "target": "a/b.c:d",
+      "match": null
+    },
+    {
+      "query": "-",
+      "target": "",
+      "match": null
+    },
+    {
+      "query": "-",
+      "target": "rigor",
+      "match": null
+    },
+    {
+      "query": "-",
+      "target": "FULL ANALYSIS",
+      "match": null
+    }
+  ]
+}

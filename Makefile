@@ -2,7 +2,8 @@ APP       := Reze
 BUNDLE_ID := com.justin06lee.reze
 UNAME     := $(shell uname -s)
 
-.PHONY: all build notarize install update stop reset-permissions launch signing
+.PHONY: all build notarize install update stop reset-permissions launch signing \
+        ios ios-test ios-shots ios-fixtures ios-icon
 
 ifeq ($(UNAME),Darwin)
 
@@ -125,6 +126,72 @@ else
 	fi
 endif
 	@echo "Installed:  $$(codesign -dv "$(INSTALLED)" 2>&1 | sed -n 's/^TeamIdentifier=//p' | sed 's/^not set$$/ad-hoc/;s/^$$/nothing/')"
+
+# ---------------------------------------------------------------- the phone
+#
+# The phone app (ios/) is two thin targets over one Swift package, ios/RezeKit,
+# which holds everything they do. The package builds and is tested on a Mac
+# with no Xcode at all; the app itself needs Xcode, to build for a phone.
+
+KIT := ios/RezeKit
+
+# Since the macOS 27 SDK, SwiftUI's @State is a compiler macro, and the plugin
+# that expands it ships inside Xcode and not with the Command Line Tools. With
+# only those selected, the package's screens are built against the last SDK
+# that needs no plugin — the tools keep it alongside. With Xcode selected this
+# is empty and nothing is overridden.
+KIT_SDK := $(shell [ "$$(xcode-select -p 2>/dev/null)" = /Library/Developer/CommandLineTools ] \
+	&& ls -d /Library/Developer/CommandLineTools/SDKs/MacOSX26.[0-9]*.sdk 2>/dev/null | tail -1)
+KIT_SWIFT := $(if $(KIT_SDK),SDKROOT=$(KIT_SDK)) swift
+
+# The same tools, building more than one test target, find the plugin for the
+# testing macros on some builds and not on others ("plugin for module
+# 'TestingMacros' not found"). Told where it is, they find it every time.
+KIT_TESTING := $(if $(KIT_SDK),-Xswiftc -load-plugin-library -Xswiftc \
+	/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing/libTestingMacros.dylib)
+
+# Everything the phone does that a Mac can check: the library format, the
+# template language and fuzzy match against the desktop's own, the client
+# against a pretend Mac, and what the keyboard does to a text field.
+#   REZE_LIVE=mac-mini make ios-test   also fetches from a real Mac, read-only.
+ios-test:
+	cd $(KIT) && $(KIT_SWIFT) test $(KIT_TESTING)
+
+# Draw the phone's screens to PNG files, on this Mac, with no phone.
+#   make ios-shots                 a made-up library, into ios/shots
+#   make ios-shots MAC=mac-mini    a real Mac's library
+#
+# Built in a folder of its own, so that drawing does not rebuild what the
+# tests built, nor the tests what this did.
+ios-shots:
+	cd $(KIT) && $(KIT_SWIFT) run --scratch-path .build/shots Shots "$(CURDIR)/ios/shots" $(MAC)
+
+# What the desktop's template language and fuzzy match make of a set of
+# inputs, for the Swift ports to be held to. Run after changing either.
+ios-fixtures:
+	bun $(KIT)/Tests/fixtures.ts
+
+# The phone's icon, from the Mac's.
+ios-icon:
+	@tmp="$$(mktemp -d)"; \
+	sips -s format png src-tauri/icons/icon.icns --out "$$tmp/mac.png" >/dev/null && \
+	swift ios/icon.swift "$$tmp/mac.png" ios/App/Assets.xcassets/AppIcon.appiconset/icon-1024.png; \
+	rm -rf "$$tmp"
+
+# Write the Xcode project and open it. Running it on a phone is then Xcode's
+# to do: pick the phone at the top of the window and press Run.
+ios: ios-test
+	@command -v xcodegen >/dev/null || { echo "xcodegen is not installed: brew install xcodegen"; exit 1; }
+	xcodegen generate --spec ios/project.yml
+	@if [ "$$(xcode-select -p 2>/dev/null)" = /Library/Developer/CommandLineTools ]; then \
+		echo; \
+		echo "The project is written, but Xcode is not set up to build it yet. Once:"; \
+		echo "  sudo xcode-select -s /Applications/Xcode.app"; \
+		echo "  sudo xcodebuild -license"; \
+		echo "Then: open ios/Reze.xcodeproj"; \
+	else \
+		open ios/Reze.xcodeproj; \
+	fi
 
 else
 
