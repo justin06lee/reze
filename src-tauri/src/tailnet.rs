@@ -30,8 +30,14 @@
 //! push, a macro saved here turning up there a second later, is this machine
 //! saying there is something to fetch (`/poke`) and that one fetching it.
 //!
-//! The conversation is plain HTTP — four GETs — so that `curl` can take
-//! either side of it when something needs debugging. It is written out by hand
+//! A shared clipboard is the third thing carried, and the only one that is
+//! not the library: with it switched on, a machine also hands out the last
+//! thing copied on it — that one thing, not the history — and, told by
+//! another that something was copied there (`/poke/clip`), goes and fetches
+//! it. Still nothing pushed, still only this user's own machines.
+//!
+//! The conversation is plain HTTP — a handful of GETs — so that `curl` can
+//! take either side of it when something needs debugging. It is written out by hand
 //! at both ends rather than pulled in as a server and a client: one side of
 //! each exchange is always this same file, so "HTTP" here only has to mean the
 //! twenty lines both ends agree on.
@@ -121,6 +127,13 @@ const FOLLOW_UP: Duration = Duration::from_secs(3);
 /// How many times to start a sync over because the library here changed
 /// while its files were on their way.
 const ATTEMPTS: usize = 4;
+
+/// The most a copied text is allowed to come to on the wire. The history
+/// keeps a megabyte at most; this is that, escaped, with room to spare.
+const MAX_CLIP: u64 = 8 * 1024 * 1024;
+
+/// The largest copied image worth fetching — the history's own limit.
+const MAX_CLIP_IMAGE: u64 = 32 * 1024 * 1024;
 
 // ---------------------------------------------------------------- tailscale
 
@@ -452,6 +465,9 @@ pub struct Hello {
     /// with the same one have nothing to fetch from each other.
     #[serde(default)]
     pub revision: String,
+    /// Whether it shares its clipboard — which, like sync, takes both.
+    #[serde(default)]
+    pub clipboard: bool,
 }
 
 enum Reply {
@@ -475,6 +491,7 @@ fn answer(path: &str, shelf: &Shelf) -> Reply {
                 attachments: library.macros.iter().map(|m| m.attachments.len()).sum(),
                 sync: library.settings.syncs(),
                 revision: crate::sync::revision(&library),
+                clipboard: library.settings.shares_clipboard(),
             };
             Reply::Json(serde_json::to_vec(&hello).unwrap_or_default())
         }
@@ -587,11 +604,12 @@ fn serve(mut stream: TcpStream, allowed: bool, shelf: &Shelf) {
     let _ = stream.set_read_timeout(Some(REQUEST));
     let _ = stream.set_write_timeout(Some(STALL));
 
+    let from = stream.peer_addr().ok().map(|peer| peer.ip());
     let request = read_request(&stream);
     let reply = match (allowed, request) {
         (false, _) => Reply::Error(403, "this is not one of that user's devices"),
         (true, None) => Reply::Error(400, "not a request Reze understands"),
-        (true, Some(path)) => answer(&path, shelf),
+        (true, Some(path)) => clipboard(&path, from).unwrap_or_else(|| answer(&path, shelf)),
     };
     let _ = send(&mut stream, reply);
 }
@@ -628,7 +646,9 @@ pub fn configure(settings: &crate::store::Settings) {
         }
     }
     let sync = settings.syncs();
-    if SYNCING.swap(sync, Ordering::SeqCst) != sync {
+    let clipboard = settings.shares_clipboard();
+    let changed = SYNCING.swap(sync, Ordering::SeqCst) != sync;
+    if CLIPPING.swap(clipboard, Ordering::SeqCst) != clipboard || changed {
         sync_soon();
     }
 }
@@ -1163,14 +1183,20 @@ fn keep_in_sync(app: tauri::AppHandle) {
     let mut told = HashMap::new();
     let mut stood = BTreeMap::new();
     loop {
-        if !SYNCING.load(Ordering::SeqCst) {
+        let syncing = SYNCING.load(Ordering::SeqCst);
+        if !syncing {
             stood.clear();
             TROUBLE.lock().unwrap().clear();
+        }
+        // A shared clipboard needs the same look around, to know who to tell.
+        if !syncing && !CLIPPING.load(Ordering::SeqCst) {
+            CLIP_PEERS.lock().unwrap().clear();
             std::thread::park_timeout(SYNC_EVERY);
             continue;
         }
         std::thread::sleep(SETTLE);
-        let round = round(&shelf, &mut told);
+        let mut round = round(&shelf, &mut told, syncing);
+        *CLIP_PEERS.lock().unwrap() = std::mem::take(&mut round.clipboards);
 
         if round.changed {
             if let Some(library) = shelf.read() {
@@ -1207,9 +1233,11 @@ struct Round {
     /// Where each machine that syncs now stands: holding the same as this
     /// one, not yet, or why it could not be synced with.
     standing: BTreeMap<Ipv4Addr, Result<bool, String>>,
+    /// The machines that share their clipboard, and what each is called.
+    clipboards: Vec<(SocketAddr, String)>,
 }
 
-fn round(shelf: &Shelf, told: &mut HashMap<SocketAddr, String>) -> Round {
+fn round(shelf: &Shelf, told: &mut HashMap<SocketAddr, String>, syncing: bool) -> Round {
     let mut out = Round::default();
     // The address first, which costs nothing to ask for: off the tailnet
     // there is nobody to sync with, and no call to start a process to hear so.
@@ -1229,11 +1257,17 @@ fn round(shelf: &Shelf, told: &mut HashMap<SocketAddr, String>) -> Round {
         })
         .collect();
     for (peer, at, answer) in asked {
-        // It takes both: a machine that has not asked to be kept in sync is
-        // left alone, though it would hand its library to anyone who asked.
-        let Some(theirs) = answer.join().ok().flatten().filter(|hello| hello.sync) else {
+        let Some(theirs) = answer.join().ok().flatten() else {
             continue;
         };
+        if theirs.clipboard {
+            out.clipboards.push((at, peer.name.clone()));
+        }
+        // It takes both: a machine that has not asked to be kept in sync is
+        // left alone, though it would hand its library to anyone who asked.
+        if !syncing || !theirs.sync {
+            continue;
+        }
         let met = match theirs.protocol == PROTOCOL {
             true => meet(at, &theirs, shelf, told),
             false => Err("it runs a different version of Reze — update both".to_string()),
@@ -1372,6 +1406,159 @@ fn mend(at: SocketAddr, shelf: &Shelf) {
         if let Err(Failed::Network(_)) = download(at, &path, &dest) {
             break;
         }
+    }
+}
+
+// ---------------------------------------------------------------- clipboard
+
+/// Whether to share the clipboard with the other machines. Mirrored from
+/// settings, like [`ENABLED`].
+static CLIPPING: AtomicBool = AtomicBool::new(false);
+
+/// The machines that share theirs, as the last round found them: who to tell
+/// when something is copied here, and what to call whoever tells us.
+static CLIP_PEERS: Mutex<Vec<(SocketAddr, String)>> = Mutex::new(Vec::new());
+
+/// One arrival at a time: two machines copying in the same second should
+/// leave one of the two on the clipboard, not half of each.
+static TAKING: Mutex<()> = Mutex::new(());
+
+/// What was last copied on a machine, as it hands it over.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Clip {
+    /// `text` or `image`.
+    kind: String,
+    #[serde(default)]
+    text: String,
+    /// For an image, the name to ask `/clip/` for.
+    #[serde(default)]
+    file: String,
+    #[serde(default)]
+    mime: String,
+    #[serde(default)]
+    bytes: u64,
+}
+
+impl Clip {
+    /// The entry, if it is something that can be handed to another machine.
+    ///
+    /// Files copied in Finder are not: the history holds them as paths, and a
+    /// path on this machine is nothing on that one.
+    fn of(entry: &crate::history::Entry) -> Option<Self> {
+        matches!(entry.kind.as_str(), "text" | "image").then(|| Self {
+            kind: entry.kind.clone(),
+            text: entry.text.clone(),
+            file: entry.file.clone(),
+            mime: entry.mime.clone(),
+            bytes: entry.bytes,
+        })
+    }
+}
+
+/// Something was copied here: tell the machines that share their clipboard,
+/// so that each comes and fetches it.
+pub fn copied() {
+    if !CLIPPING.load(Ordering::SeqCst) {
+        return;
+    }
+    for (at, _) in CLIP_PEERS.lock().unwrap().iter().cloned() {
+        // Each on a thread of its own: a machine that has just gone to sleep
+        // takes seconds to not answer, and the others should not wait on it.
+        std::thread::spawn(move || {
+            let _ = fetch(at, "/poke/clip", PROBE, MAX_HEAD);
+        });
+    }
+}
+
+/// Answer a request about the clipboard, or `None` if `path` is not one.
+///
+/// With sharing off every one of them is answered as though there were no
+/// clipboard here at all.
+fn clipboard(path: &str, from: Option<IpAddr>) -> Option<Reply> {
+    let latest = || {
+        CLIPPING
+            .load(Ordering::SeqCst)
+            .then(crate::history::latest)
+            .flatten()
+    };
+    match path {
+        // "Something was copied over here." As with `/poke`, nothing is taken
+        // on the word of whoever says it — this machine goes and asks.
+        "/poke/clip" => {
+            if let (true, Some(IpAddr::V4(from))) = (CLIPPING.load(Ordering::SeqCst), from) {
+                std::thread::spawn(move || take_clip(from));
+            }
+            Some(Reply::Json(b"{}".to_vec()))
+        }
+        // The last thing copied, and only that: the history stays here.
+        "/clip" => Some(match latest().as_ref().and_then(Clip::of) {
+            Some(clip) => Reply::Json(serde_json::to_vec(&clip).unwrap_or_default()),
+            None => Reply::Error(404, "no clipboard is shared here"),
+        }),
+        _ => {
+            let name = decode(path.strip_prefix("/clip/")?);
+            let file = latest()
+                .filter(|entry| entry.kind == "image" && entry.file == name)
+                .and_then(|entry| {
+                    crate::assets::bare_name(&crate::history::clip_dir(), &entry.file).ok()
+                })
+                .and_then(|path| std::fs::File::open(path).ok())
+                .and_then(|file| file.metadata().ok().map(|meta| (file, meta)));
+            Some(match file {
+                Some((file, meta)) if meta.is_file() => Reply::File(file, meta.len()),
+                _ => Reply::Error(404, "that is not what was last copied here"),
+            })
+        }
+    }
+}
+
+/// Fetch what was just copied on the machine at `from`, and put it on this
+/// one's clipboard.
+fn take_clip(from: Ipv4Addr) {
+    let _one = TAKING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let at = SocketAddr::from((from, PORT));
+    let Some(clip) = fetch(at, "/clip", STALL, MAX_CLIP)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Clip>(&raw).ok())
+    else {
+        return;
+    };
+    let file = match clip.kind.as_str() {
+        "text" => String::new(),
+        "image" if clip.bytes <= MAX_CLIP_IMAGE => {
+            let dir = crate::history::clip_dir();
+            // Under a name of our own: theirs is only what to ask them for.
+            let name = format!(
+                "{}.{}",
+                uuid::Uuid::new_v4(),
+                crate::assets::ext_for_mime(&clip.mime)
+            );
+            let fetched = std::fs::create_dir_all(&dir).is_ok()
+                && download(at, &format!("/clip/{}", encode(&clip.file)), &dir.join(&name)).is_ok();
+            if !fetched {
+                return;
+            }
+            name
+        }
+        _ => return,
+    };
+    let from = CLIP_PEERS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(peer, _)| *peer == at)
+        .map(|(_, name)| name.clone())
+        .unwrap_or_else(|| from.to_string());
+    let arrived = crate::history::receive(crate::history::Arrival {
+        kind: clip.kind,
+        text: clip.text,
+        file,
+        mime: clip.mime,
+        from,
+    });
+    if let Err(e) = arrived {
+        eprintln!("reze: a copy from another machine could not be taken: {e}");
     }
 }
 
@@ -1532,7 +1719,7 @@ mod tests {
         assert!(!hello.sync);
         assert_eq!(hello.revision, shelf.revision().unwrap());
         let old: Hello = serde_json::from_str(r#"{"protocol":1,"os":"linux","macros":3}"#).unwrap();
-        assert!(!old.sync && old.revision.is_empty());
+        assert!(!old.sync && old.revision.is_empty() && !old.clipboard);
         assert_eq!(code_of(&answer("/poke", &shelf)), 200);
 
         let Reply::Json(raw) = answer("/library", &shelf) else {
@@ -1608,6 +1795,7 @@ mod tests {
                 attachments: 0,
                 sync: false,
                 revision: String::new(),
+                clipboard: false,
             },
             library: shelf.read().unwrap(),
             at,
@@ -1865,5 +2053,41 @@ mod tests {
         mend(serving(b.clone(), true, 1), &a);
         assert_eq!(std::fs::read(a.assets.join("a.png")).unwrap(), b"found");
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_clipboard_that_is_not_shared_is_not_there_to_be_asked_for() {
+        // Sharing is off unless switched on, and off is what a test runs as.
+        assert!(!CLIPPING.load(Ordering::SeqCst));
+        let stranger = Some(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 9)));
+
+        for path in ["/clip", "/clip/whatever.png", "/clip/..%2Fclipboard.json"] {
+            let reply = clipboard(path, stranger).expect("a clipboard path fell through");
+            assert_eq!(code_of(&reply), 404, "{path} was answered");
+        }
+        // Being told of a copy is acknowledged and otherwise ignored.
+        assert_eq!(code_of(&clipboard("/poke/clip", stranger).unwrap()), 200);
+        // And everything else is not the clipboard's to answer.
+        assert!(clipboard("/library", stranger).is_none());
+        assert!(clipboard("/poke", stranger).is_none());
+    }
+
+    #[test]
+    fn only_what_can_exist_on_another_machine_is_handed_over() {
+        let entry = |kind: &str| crate::history::Entry {
+            id: "1".into(),
+            kind: kind.into(),
+            text: "copied".into(),
+            file: String::new(),
+            paths: vec!["/Users/me/report.pdf".into()],
+            mime: "text/plain".into(),
+            bytes: 6,
+            digest: String::new(),
+            copied_at: 0,
+            source: None,
+        };
+        assert_eq!(Clip::of(&entry("text")).unwrap().text, "copied");
+        assert!(Clip::of(&entry("image")).is_some());
+        assert!(Clip::of(&entry("file")).is_none(), "a path was offered as a copy");
     }
 }

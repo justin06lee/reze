@@ -513,6 +513,28 @@ is whichever window last claimed it, not an app — so on Linux it is the focuse
 window when the clipboard changed. Its name comes from the app's desktop entry
 ("Google Chrome", not `google-chrome`) and its icon from the window itself.
 
+### Sharing it between machines
+
+Tick **Share the clipboard between my devices** — in Settings → Clipboard
+history, or in the welcome — on each machine, and what you copy on one is on
+the clipboard of the others about a second later: ⌘C here, ⌘V there. It also
+lands in each machine's history, with the name of the machine it was copied on
+where the app would be.
+
+- **Text and images.** Not files copied in Finder: the history keeps those as
+  paths, and a path on one machine is nothing on another.
+- **Never what is marked private.** A copy the history skips — see below — is
+  never recorded, so it is never there to hand over.
+- **Only the last thing copied.** A machine hands out the newest entry and
+  nothing else; the history itself stays where it is.
+- **It takes both,** like [sync](#keeping-them-in-sync), and travels the same
+  way: over Tailscale, between machines signed in as you, each one fetching
+  from the other rather than anything being pushed. It needs **Remember what I
+  copy** on, since the newest entry in the history is what is handed over.
+
+A machine that was asleep when you copied does not get that copy when it
+wakes; it gets the next one.
+
 ### What it does not record
 
 - **Anything an app marks private.** Password managers and their kind put
@@ -577,6 +599,7 @@ to have it on every machine you use, [switch sync on](#keeping-them-in-sync).
     "clipboardLimit": 200,
     "shareOverTailscale": true,  // let your other machines import this
     "sync": false,               // keep it the same as theirs — see Other devices
+    "clipboardSync": false,      // ⌘C here, ⌘V on your other machines
     "onboarded": true            // false shows the welcome again
   },
   "macros": [
@@ -725,7 +748,8 @@ of its own — and keeps what it does to three rules:
   shared tailnet, a node shared in from another one, a tagged server — is
   refused whatever it asks for.
 - **Only reading.** It hands over `macros.json` and the attachment files that
-  names. No request changes anything; importing is something the other machine
+  names — and, only with [clipboard sharing](#sharing-it-between-machines)
+  switched on, the last thing copied. No request changes anything; importing is something the other machine
   does to itself. Sync is the same thing done unasked: each machine fetches
   from the others and changes only itself, and nothing is ever pushed. The one
   request that is not a fetch, `/poke`, says "I have something new" — and all

@@ -329,10 +329,127 @@ pub fn clear() {
     persist(&history);
 }
 
+/// The newest thing copied, whole — what a machine sharing its clipboard
+/// hands to the others.
+pub fn latest() -> Option<Entry> {
+    store().lock().unwrap().entries.first().cloned()
+}
+
+/// Something copied on another of this user's machines.
+pub struct Arrival {
+    /// `text` or `image`.
+    pub kind: String,
+    pub text: String,
+    /// For an image: the bare name it was fetched under, already in
+    /// [`clip_dir`].
+    pub file: String,
+    pub mime: String,
+    /// The machine it was copied on, by its tailnet name.
+    pub from: String,
+}
+
+/// Put what another machine copied on this one's clipboard, and remember it
+/// like anything copied here — with the machine it came from where the app
+/// would be.
+///
+/// Says whether anything changed: the same thing arriving twice, or arriving
+/// back at the machine that copied it, is not a change.
+pub fn receive(arrival: Arrival) -> Result<bool, String> {
+    if !ENABLED.load(Ordering::SeqCst) {
+        return Ok(false);
+    }
+    let blob = match arrival.kind.as_str() {
+        "image" => Some(crate::assets::bare_name(&clip_dir(), &arrival.file)?),
+        _ => None,
+    };
+    let (digest, bytes) = match &blob {
+        Some(path) => {
+            let image = std::fs::read(path).map_err(|e| format!("reading {path:?}: {e}"))?;
+            (hash(&image), image.len() as u64)
+        }
+        None => (hash(arrival.text.as_bytes()), arrival.text.len() as u64),
+    };
+
+    let mut history = store().lock().unwrap();
+    let known = history.entries.iter().position(|e| e.digest == digest);
+    if known == Some(0) {
+        // Already the newest thing here, which is to say already on the
+        // clipboard. The copy just fetched is one too many.
+        if let Some(path) = &blob {
+            let _ = std::fs::remove_file(path);
+        }
+        return Ok(false);
+    }
+
+    {
+        // Ours to write, and not something anyone copied *here*: without this
+        // it would be recorded a second time, and announced straight back.
+        let _quiet = suspend();
+        match &blob {
+            Some(path) => crate::paste::copy_payload(&crate::paste::Payload::Image {
+                mime: arrival.mime.clone(),
+                path: path.clone(),
+            })?,
+            None => crate::paste::write_clipboard(&arrival.text)?,
+        }
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    match known {
+        Some(pos) => {
+            // Copied here before, and now there: one entry, moved up.
+            let mut moved = history.entries.remove(pos);
+            moved.copied_at = now;
+            history.entries.insert(0, moved);
+            if let Some(path) = &blob {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        None => {
+            history.entries.insert(
+                0,
+                Entry {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    kind: arrival.kind,
+                    text: arrival.text,
+                    file: arrival.file,
+                    paths: Vec::new(),
+                    mime: arrival.mime,
+                    bytes,
+                    digest,
+                    copied_at: now,
+                    source: Some(Source {
+                        bundle_id: String::new(),
+                        name: arrival.from,
+                        icon: String::new(),
+                    }),
+                },
+            );
+            prune(&mut history);
+        }
+    }
+    persist(&history);
+    drop(history);
+
+    if let Some(app) = APP.get() {
+        use tauri::Emitter;
+        let _ = app.emit("clipboard-changed", views());
+    }
+    Ok(true)
+}
+
+/// For telling the windows about a copy that arrived from another machine,
+/// which happens on a thread nobody handed an app to.
+static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+
 /// Start watching the pasteboard. Must be called on the main thread, where
 /// Linux's change counter hooks into GTK. Does nothing useful where there is no
 /// change count to watch.
 pub fn start(app: tauri::AppHandle) {
+    let _ = APP.set(app.clone());
     let _ = std::fs::create_dir_all(icons_dir());
     crate::clip::watch();
     SEEN.store(change_count(), Ordering::SeqCst);
@@ -361,6 +478,8 @@ pub fn start(app: tauri::AppHandle) {
         if record(snapshot).is_some() {
             use tauri::Emitter;
             let _ = app.emit("clipboard-changed", views());
+            // And the other machines, if the clipboard is shared with them.
+            crate::tailnet::copied();
         }
     });
 }

@@ -89,6 +89,12 @@ pub struct Settings {
     /// one setting that lets another machine change what is here.
     #[serde(default)]
     pub sync: bool,
+    /// Put what is copied here on the clipboard of this user's other
+    /// machines, and what is copied there on this one. See
+    /// [`crate::tailnet`]. Off unless asked for, like `sync`: a clipboard is
+    /// the most private thing on the machine.
+    #[serde(default)]
+    pub clipboard_sync: bool,
     /// Whether the welcome has been gone through on this machine. Until it
     /// has, the editor opens on it instead of on the macros.
     #[serde(default)]
@@ -135,6 +141,15 @@ impl Settings {
     pub fn syncs(&self) -> bool {
         self.sync && self.share_over_tailscale
     }
+
+    /// Whether this machine shares its clipboard with the others.
+    ///
+    /// The same two-way fetching as sync, so it needs the same listener — and
+    /// what it hands over is the newest thing in the history, so with nothing
+    /// being remembered there is nothing to hand.
+    pub fn shares_clipboard(&self) -> bool {
+        self.clipboard_sync && self.share_over_tailscale && self.clipboard_history
+    }
 }
 
 impl Default for Settings {
@@ -151,6 +166,7 @@ impl Default for Settings {
             clipboard_limit: crate::history::default_limit(),
             share_over_tailscale: true,
             sync: false,
+            clipboard_sync: false,
             onboarded: false,
         }
     }
