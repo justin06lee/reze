@@ -45,6 +45,7 @@ struct Toast: ViewModifier {
                         if !Task.isCancelled { self.message = nil }
                     }
                     .accessibilityAddTraits(.isStaticText)
+                    .accessibilityIdentifier("reze.notice")
             }
         }
         .animation(.snappy, value: message)

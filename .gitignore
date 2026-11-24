@@ -35,3 +35,4 @@ ios/App/Reze.entitlements
 ios/Keyboard/Info.plist
 ios/Keyboard/RezeKeyboard.entitlements
 ios/shots
+ios/build

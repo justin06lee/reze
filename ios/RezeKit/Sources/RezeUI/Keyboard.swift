@@ -189,6 +189,7 @@ public struct KeyboardPanel: View {
                 .frame(maxWidth: .infinity, minHeight: 34)
                 .padding(.horizontal, 8)
                 .background(Theme.accent(scheme).opacity(0.18), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .accessibilityIdentifier("reze.notice")
                 .task(id: notice) {
                     try? await Task.sleep(for: .seconds(4))
                     if !Task.isCancelled { state.notice = nil }
@@ -208,6 +209,7 @@ public struct KeyboardPanel: View {
                 .background(Theme.accent(scheme), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("reze.replace")
         } else if !state.tags.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
@@ -255,6 +257,7 @@ public struct KeyboardPanel: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityHint(macro.attachments.isEmpty ? "Types it" : "Copies its attachment")
+                    .accessibilityIdentifier("reze.key")
                 }
             }
         }
