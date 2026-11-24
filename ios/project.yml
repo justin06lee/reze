@@ -2,10 +2,11 @@
 # ios/Reze.xcodeproj with xcodegen and opens it; the project itself is not
 # kept in git, so this file is the only place to change it.
 #
-# Two targets and one package:
+# Three targets and one package:
 #   Reze          the app: asks which Mac, fetches its library, copies macros
 #   RezeKeyboard  the keyboard: types the macros the app fetched
-#   RezeKit       (ios/RezeKit) everything both are made of
+#   RezeUITests   drives both in a simulator, against a real Mac (make ios-uitest)
+#   RezeKit       (ios/RezeKit) everything they are made of
 name: Reze
 
 options:
@@ -117,3 +118,29 @@ targets:
       properties:
         com.apple.security.application-groups:
           - group.com.justin06lee.reze
+
+  RezeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - UITests
+    dependencies:
+      - target: Reze
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.justin06lee.reze.ios.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Reze
+
+schemes:
+  Reze:
+    build:
+      targets:
+        Reze: all
+        RezeUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - RezeUITests

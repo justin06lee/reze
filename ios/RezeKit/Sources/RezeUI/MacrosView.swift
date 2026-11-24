@@ -143,5 +143,6 @@ struct MacroRow: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityHint("Copies it")
+        .accessibilityIdentifier("reze.macro")
     }
 }

@@ -3,7 +3,7 @@ BUNDLE_ID := com.justin06lee.reze
 UNAME     := $(shell uname -s)
 
 .PHONY: all build notarize install update stop reset-permissions launch signing \
-        ios ios-test ios-shots ios-fixtures ios-icon
+        ios ios-test ios-shots ios-fixtures ios-icon ios-sim ios-uitest
 
 ifeq ($(UNAME),Darwin)
 
@@ -178,19 +178,38 @@ ios-icon:
 	swift ios/icon.swift "$$tmp/mac.png" ios/App/Assets.xcassets/AppIcon.appiconset/icon-1024.png; \
 	rm -rf "$$tmp"
 
+# Build the app for a simulated iPhone, start it there with no window, and
+# take its picture (ios/shots/simulator.png). Needs an Xcode, not a phone.
+#   make ios-sim MAC=mac-mini      start it already fetching from that Mac
+ios-sim:
+	@ios/sim.sh $(MAC)
+
+# Drive the app, and its keyboard if the simulator has it added, the way a
+# person would (ios/UITests). Leans on `make ios-sim` having started the phone.
+#   make ios-uitest MAC=mac-mini
+ios-uitest:
+	@[ -n "$(MAC)" ] || { echo "Name a Mac to fetch from: make ios-uitest MAC=mac-mini"; exit 1; }
+	TEST_RUNNER_REZE_LIVE="$(MAC)" TEST_RUNNER_REZE_SHOTS="$(CURDIR)/ios/shots" \
+	xcodebuild -project ios/Reze.xcodeproj -scheme Reze -destination "name=Reze iPhone" \
+		-derivedDataPath ios/build test
+
 # Write the Xcode project and open it. Running it on a phone is then Xcode's
 # to do: pick the phone at the top of the window and press Run.
+#
+# Whichever Xcode is selected is the one used and opened. To use another for
+# one run, name it: DEVELOPER_DIR=/path/to/Xcode.app/Contents/Developer make ios
 ios: ios-test
 	@command -v xcodegen >/dev/null || { echo "xcodegen is not installed: brew install xcodegen"; exit 1; }
 	xcodegen generate --spec ios/project.yml
-	@if [ "$$(xcode-select -p 2>/dev/null)" = /Library/Developer/CommandLineTools ]; then \
+	@if ! xcodebuild -version >/dev/null 2>&1; then \
 		echo; \
-		echo "The project is written, but Xcode is not set up to build it yet. Once:"; \
+		echo "The project is written, but no Xcode is set up to build it yet. Once:"; \
 		echo "  sudo xcode-select -s /Applications/Xcode.app"; \
 		echo "  sudo xcodebuild -license"; \
 		echo "Then: open ios/Reze.xcodeproj"; \
 	else \
-		open ios/Reze.xcodeproj; \
+		xcode="$$(xcode-select -p)"; \
+		open -a "$${xcode%/Contents/Developer}" ios/Reze.xcodeproj; \
 	fi
 
 else

@@ -19,8 +19,8 @@ synthetic input into other applications by design, which is the mechanism this
 whole app rests on.
 
 There is the start of an iPhone app and keyboard too, which read the library
-from one of your Macs — written and tested as far as a Mac can test it, not
-yet run on a phone. See [On the phone](#on-the-phone).
+from one of your Macs — tested on a Mac and run in an iOS simulator, not yet
+on a phone. See [On the phone](#on-the-phone).
 
 Hit a global hotkey anywhere, type `full analysis`, press Enter — the paragraph
 you actually meant gets pasted into whatever app you were already in.
@@ -780,13 +780,13 @@ your Macs to your phone, over Tailscale.
 > **Where this stands.** Everything the app and the keyboard *do* — reading a
 > Mac's library, the template language, search, fetching and keeping the
 > files, what the keyboard does to a text field — is in a Swift package that
-> is built and tested on a Mac (`make ios-test`), and has fetched a real
-> library from a real Mac. The app itself has **never been built for a phone
-> or run on one**: about a hundred lines exist only on iOS (the keyboard's
-> view controller, the app's entry point, the iOS half of the clipboard code)
-> and no compiler has seen them yet. Expect to fix something the first time
-> it is opened in Xcode. [What has not been tried](#what-has-not-been-tried)
-> lists what to check.
+> is built and tested on a Mac (`make ios-test`). The app and the keyboard
+> both build for iOS, and the app has run in an iOS simulator, where it
+> fetched a real library from a real Mac and listed it (`make ios-sim`).
+> **It has not been on a physical phone, and the keyboard has never been
+> brought up on iOS at all** — it compiles, and its panel is drawn and its
+> behaviour tested on a Mac, which is not the same thing.
+> [What has not been tried](#what-has-not-been-tried) lists what to check.
 
 ### What it does
 
@@ -844,7 +844,8 @@ sudo xcode-select -s /Applications/Xcode.app
 sudo xcodebuild -license
 ```
 
-Then:
+Or, to use an Xcode that is not the selected one, name it on each command:
+`DEVELOPER_DIR=/path/to/Xcode.app/Contents/Developer make ios`. Then:
 
 ```bash
 make ios        # run the tests, write ios/Reze.xcodeproj, open it
@@ -880,8 +881,18 @@ make ios-test                    # every test, on this Mac
 REZE_LIVE=mac-mini make ios-test # and fetch from a real Mac, read-only
 make ios-shots                   # draw the screens to ios/shots/*.png
 make ios-shots MAC=mac-mini      # …with a real Mac's library in them
+make ios-sim MAC=mac-mini        # the real app in a simulated iPhone
+make ios-uitest MAC=mac-mini     # drive it there (see below: not yet run)
 make ios-fixtures                # after changing template.ts or fuzzy.ts
 ```
+
+The first four need no Xcode, only the Command Line Tools. `make ios-sim`
+needs one: it builds the app and its keyboard for the simulator, starts a
+simulated iPhone with no window, opens Reze on it already told which Mac
+(`-RezeMac mac-mini`, a launch argument the app takes anywhere), and leaves a
+picture in `ios/shots/simulator.png`. A simulated phone is on this Mac's own
+network, so it reaches the Mac's Tailscale address the way a phone on the
+tailnet would. `open -a Simulator` shows it, to use by hand.
 
 - `ios/RezeKit/Sources/RezeKit` — no interface at all: the library as a Mac
   hands it over (`Models`), the template language (`Template`), search and
@@ -892,6 +903,11 @@ make ios-fixtures                # after changing template.ts or fuzzy.ts
   what lets the tests run and the screens be drawn here.
 - `ios/App`, `ios/Keyboard` — the two targets, each a few lines that put
   RezeUI on screen.
+- `ios/UITests` — the app, and the keyboard, driven the way a person would in
+  the simulator. It compiles and has never run: where this was written,
+  Xcode's test runner could not attach to the simulator ("failed to bless
+  service hub"), from the command line at least. ⌘U in Xcode is the thing to
+  try.
 
 The template language and the fuzzy match exist twice, in TypeScript for the
 desktop and in Swift for the phone. `make ios-fixtures` runs the desktop's own
@@ -913,27 +929,34 @@ nothing is overridden.
 
 ### What has not been tried
 
-Nothing here has run on a phone. In the order worth checking:
+What has: the package's tests; the app and keyboard compiling for iOS; the
+app, in an iOS 26.5 simulator, fetching a 25-macro library and its 12
+attachments from a Mac over plain HTTP and listing them. What has not, in the
+order worth checking:
 
-1. **That it compiles.** `ios/App/RezeApp.swift`,
-   `ios/Keyboard/KeyboardViewController.swift`, the `UIKit` branch of
-   `RezeUI/Clipboard.swift` and the few `#if os(iOS)` modifiers.
-2. **That the Mac answers the phone.** It should: the phone is one of your
-   devices as far as `tailscale whois` is concerned. If the app says the Mac
-   only answers your own devices, the phone is signed in to Tailscale as
-   someone else.
-3. **That the keyboard can read the library without Full Access.** iOS
+1. **A physical phone.** Signing, the App Group and Tailscale on the phone
+   itself are all first-time things. If the app says the Mac only answers
+   your own devices, the phone is signed in to Tailscale as someone else.
+2. **The keyboard, on iOS.** It has never been added in Settings or brought
+   up. Start with a text macro in Notes.
+3. **Tapping.** Nothing in the simulator was tapped: copying a macro, the
+   variables sheet, Settings and Forget this Mac have only been drawn and
+   tested on a Mac. `ios/UITests` exists to do this and has not run.
+4. **That the keyboard can read the library without Full Access.** iOS
    documents the shared container as needing it, and in practice lets a
-   keyboard read one without. If the keyboard says there are no macros after
-   the app has fetched them, turn Full Access on.
-4. **Pasting a picture or a video.** They go on the clipboard under the type
+   keyboard read one without. A simulator does not enforce this, so only a
+   phone can say. If the keyboard says there are no macros after the app has
+   fetched them, turn Full Access on.
+5. **Pasting a picture or a video.** They go on the clipboard under the type
    the Mac recorded (`image/png`, `video/mp4`, …); whether a given app takes a
    paste of that type is up to the app.
-5. **A macro with both text and attachments, copied from the app**, goes on
+6. **A macro with both text and attachments, copied from the app**, goes on
    the clipboard as separate items. Some apps paste all of them, some only
    the first.
-6. **Replacing a typed name** deletes one character per character of the
+7. **Replacing a typed name** deletes one character per character of the
    name. Names with emoji in them are where that count could be off.
+8. **Xcode 27.** It was built with Xcode 26.5, and nothing newer has
+   compiled the app.
 
 ## Typing awareness
 

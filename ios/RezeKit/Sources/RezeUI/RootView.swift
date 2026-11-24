@@ -30,8 +30,16 @@ public struct RootView: View {
         // phone gives an app no way to be told, and little time in the
         // background to ask, so this is when the copy is brought up to date.
         .onChange(of: phase, initial: true) { _, now in
-            if now == .active {
-                Task { await phone.refresh() }
+            guard now == .active else { return }
+            Task {
+                // `-RezeMac mac-mini` on the command line names the Mac
+                // without typing it: what `make ios-sim MAC=…` passes, and
+                // what a scheme's launch arguments can.
+                if phone.fetched == nil, let named = UserDefaults.standard.string(forKey: "RezeMac") {
+                    await phone.find(named)
+                } else {
+                    await phone.refresh()
+                }
             }
         }
     }
