@@ -47,6 +47,7 @@ export default function Onboarding({
   const [net, setNet] = useState<Tailnet | null>(null);
   // Null until chosen: until then it follows what the tailnet turns out to hold.
   const [sync, setSync] = useState<boolean | null>(null);
+  const [clipboard, setClipboard] = useState<boolean | null>(null);
   const [login, setLogin] = useState<LoginItemState | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
 
@@ -104,6 +105,7 @@ export default function Onboarding({
   // A machine of yours that already syncs is a library waiting to be joined;
   // that, or sync being on here already, is what ticks the box unasked.
   const wantsSync = sync ?? (s.sync || others.some((d) => d.reze?.sync));
+  const wantsClipboard = clipboard ?? (s.clipboardSync || others.some((d) => d.reze?.clipboard));
 
   const finish = (settings: Partial<Settings>) =>
     update({ ...library, settings: { ...s, ...settings, onboarded: true } });
@@ -111,7 +113,11 @@ export default function Onboarding({
   const done = () =>
     finish(
       net?.state === "running"
-        ? { sync: wantsSync, shareOverTailscale: wantsSync || s.shareOverTailscale }
+        ? {
+            sync: wantsSync,
+            clipboardSync: wantsClipboard,
+            shareOverTailscale: wantsSync || wantsClipboard || s.shareOverTailscale,
+          }
         : {},
     );
 
@@ -250,6 +256,20 @@ export default function Onboarding({
                       {others.length === 0
                         ? "Your other machines join when you switch it on there."
                         : "Nothing is lost by joining: the two libraries are merged, and this one is set aside first."}
+                    </em>
+                  </span>
+                </label>
+                <label className="e-check">
+                  <input
+                    type="checkbox"
+                    checked={wantsClipboard}
+                    onChange={(e) => setClipboard(e.target.checked)}
+                  />
+                  <span>
+                    Share the clipboard between them
+                    <em>
+                      Copy on one machine, paste on another. Text and images, between machines
+                      that have this on — never what a password manager marks as a password.
                     </em>
                   </span>
                 </label>

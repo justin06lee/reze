@@ -1034,9 +1034,40 @@ function ClipboardSection({
           Remember what I copy
           <em>
             Kept in <code>~/.reze/clipboard.json</code> on this machine, in plain text —
-            nothing is sent anywhere. Apps that mark a copy as a password, and anything Reze
+            nothing is sent anywhere unless you share it below. Apps that mark a copy as a
+            password, and anything Reze
             itself puts on the clipboard, are skipped. Turn this off and the list stops growing;
             what is already in it stays until you clear it.
+          </em>
+        </span>
+      </label>
+
+      <label className="e-check">
+        <input
+          type="checkbox"
+          checked={s.clipboardSync && s.shareOverTailscale && s.clipboardHistory}
+          disabled={!s.clipboardHistory}
+          onChange={(e) => {
+            const on = e.target.checked;
+            update({
+              ...library,
+              settings: {
+                ...s,
+                clipboardSync: on,
+                shareOverTailscale: on || s.shareOverTailscale,
+              },
+            });
+          }}
+        />
+        <span>
+          Share the clipboard between my devices
+          <em>
+            Copy on one machine, paste on another: what you copy here is on the clipboard of
+            your other machines a moment later, and what you copy there is on this one. Text
+            and images — not files, and not what a password manager marks as a password. It
+            travels over Tailscale between machines signed in as you, takes this being on at
+            both ends, and needs the history above, since the last thing in it is what is
+            handed over.
           </em>
         </span>
       </label>

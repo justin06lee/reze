@@ -75,6 +75,8 @@ export type Settings = {
   shareOverTailscale: boolean;
   /** Keep this library the same as your other machines that have this on too. */
   sync: boolean;
+  /** Put what is copied here on your other machines' clipboards, and theirs here. */
+  clipboardSync: boolean;
   /** Whether the welcome has been gone through on this machine. */
   onboarded: boolean;
 };
@@ -219,6 +221,8 @@ export type Hello = {
   sync: boolean;
   /** What its library holds. The same as this machine's means in sync. */
   revision: string;
+  /** Whether it shares its clipboard. That takes both machines too. */
+  clipboard: boolean;
 };
 
 /** One of your other machines on the tailnet. */
