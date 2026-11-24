@@ -283,3 +283,13 @@ mod imp {
 }
 
 pub use imp::{launched_at_login, open_settings, set, status};
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_test_run_was_not_started_by_the_login_items() {
+        // Mostly that asking does not crash: on macOS it is three messages to
+        // Objective-C, checked against the runtime only in a debug build.
+        assert!(!super::launched_at_login());
+    }
+}
