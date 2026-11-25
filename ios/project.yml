@@ -49,6 +49,13 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         TARGETED_DEVICE_FAMILY: "1,2"
+      configs:
+        # A Release build is the one that goes to TestFlight, signed with a
+        # profile made through the App Store Connect API (ios/asc.ts) and
+        # named here. Debug stays automatic, for running from Xcode.
+        Release:
+          CODE_SIGN_STYLE: Manual
+          PROVISIONING_PROFILE_SPECIFIER: Reze App Store
     info:
       path: App/Info.plist
       properties:
@@ -96,6 +103,10 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.justin06lee.reze.ios.keyboard
         TARGETED_DEVICE_FAMILY: "1,2"
+      configs:
+        Release:
+          CODE_SIGN_STYLE: Manual
+          PROVISIONING_PROFILE_SPECIFIER: Reze Keyboard App Store
     info:
       path: Keyboard/Info.plist
       properties:

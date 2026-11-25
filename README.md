@@ -781,11 +781,12 @@ your Macs to your phone, over Tailscale.
 > Mac's library, the template language, search, fetching and keeping the
 > files, what the keyboard does to a text field — is in a Swift package that
 > is built and tested on a Mac (`make ios-test`). The app and the keyboard
-> both build for iOS, and the app has run in an iOS simulator, where it
-> fetched a real library from a real Mac and listed it (`make ios-sim`).
-> **It has not been on a physical phone, and the keyboard has never been
-> brought up on iOS at all** — it compiles, and its panel is drawn and its
-> behaviour tested on a Mac, which is not the same thing.
+> both build for iOS, the app has run in an iOS simulator, where it fetched
+> a real library from a real Mac and listed it (`make ios-sim`), and a signed
+> build is on [TestFlight](#testflight). **Nobody has yet reported back from
+> a physical phone, and the keyboard has never been brought up on iOS at
+> all** — it compiles, and its panel is drawn and its behaviour tested on a
+> Mac, which is not the same thing.
 > [What has not been tried](#what-has-not-been-tried) lists what to check.
 
 ### What it does
@@ -874,6 +875,43 @@ knowing about:
 - **An App Group**, `group.com.justin06lee.reze`, is how the app hands the
   library to the keyboard. The same name is `Shelf.group` in the package.
 
+### TestFlight
+
+```bash
+make ios-testflight            # archive, upload, wait until it can be installed
+make ios-testflight UPLOAD=0   # archive and export an .ipa only
+```
+
+`ios/testflight.sh` archives a Release build signed with the team's Apple
+Distribution identity, uploads it to App Store Connect, puts the account
+holder in an internal tester group called "Justin", and waits until Apple
+has processed it. Then it is in the TestFlight app on the phone, as **Reze
+Macros** (the name the record was given; on the home screen it is Reze).
+The build number is the time, so each upload is newer than the last. The
+first one, 0.1.0 (202611251533), went up on 2026-11-25.
+
+`ios/asc.ts` is the part that talks to App Store Connect, through its API
+with the key in `~/.appstoreconnect/private_keys` (never in this repo):
+`bun ios/asc.ts check` says what is in place and what is missing.
+
+Three things about how it signs, each learned the hard way:
+
+- **It is manual.** Xcode's own automatic signing is refused with this API
+  key ("Authentication failed … bearer token"), and Apple's cloud signing is
+  refused to the key's role. So the two App Store profiles ("Reze App Store",
+  "Reze Keyboard App Store") are made through the API and named in
+  `ios/project.yml` for Release builds. Debug builds stay automatic, for
+  running from Xcode.
+- **Two things the API will not do**, which the account holder did once by
+  hand: making the App Group and giving it to both identifiers
+  (developer.apple.com → Identifiers), and making the app's record
+  (appstoreconnect.apple.com → Apps). Change an identifier's capabilities and
+  its profile has to be made again: `bun ios/asc.ts profiles`.
+- **The identity is picked by its fingerprint**, from the team's signing
+  keychain (`~/Library/Keychains/midna-signing.keychain-db`, shared with the
+  team's other apps). The login keychain holds a second certificate with the
+  same name, and signing by name picks whichever it likes.
+
 ### Working on it without a phone
 
 ```bash
@@ -934,9 +972,10 @@ app, in an iOS 26.5 simulator, fetching a 25-macro library and its 12
 attachments from a Mac over plain HTTP and listing them. What has not, in the
 order worth checking:
 
-1. **A physical phone.** Signing, the App Group and Tailscale on the phone
-   itself are all first-time things. If the app says the Mac only answers
-   your own devices, the phone is signed in to Tailscale as someone else.
+1. **A physical phone.** The build is signed, carries the App Group and was
+   accepted by TestFlight; running it, and Tailscale on the phone itself,
+   are first-time things. If the app says the Mac only answers your own
+   devices, the phone is signed in to Tailscale as someone else.
 2. **The keyboard, on iOS.** It has never been added in Settings or brought
    up. Start with a text macro in Notes.
 3. **Tapping.** Nothing in the simulator was tapped: copying a macro, the
