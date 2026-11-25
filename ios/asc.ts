@@ -225,7 +225,7 @@ async function builds(): Promise<any> {
   if (!app) return { data: [] };
   return asc(
     "GET",
-    `/v1/builds?filter[app]=${app.id}&sort=-uploadedDate&limit=10&fields[builds]=version,processingState,uploadedDate&include=buildBetaDetail&fields[buildBetaDetails]=internalBuildState`,
+    `/v1/builds?filter[app]=${app.id}&sort=-uploadedDate&limit=10&fields[builds]=version,processingState,uploadedDate,buildBetaDetail&include=buildBetaDetail&fields[buildBetaDetails]=internalBuildState`,
   );
 }
 
