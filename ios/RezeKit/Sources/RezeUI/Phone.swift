@@ -21,18 +21,32 @@ public final class Phone: ObservableObject {
     /// What just happened, shown for a moment.
     @Published public var notice: String?
 
+    /// What has been copied, here and on the Mac, newest first.
+    @Published public private(set) var clips: [ClipEntry] = []
+    /// Why the clipboard could not be evened out with the Mac last time.
+    @Published public private(set) var clipTrouble: String?
+
     /// Where the library is kept. `nil` if the build has no App Group, which
     /// is a mistake in how it was signed and is said rather than hidden.
     public let shelf: Shelf?
 
     /// For talking to a pretend Mac in tests and previews.
     let connect: (Mac) -> Client
+    /// The phone's clipboard, or `nil` to leave it alone (tests, drawings).
+    let pasteboard: Pasteboard?
+    private var exchanging = false
 
-    public init(shelf: Shelf? = .shared(), connect: @escaping (Mac) -> Client = { Client($0) }) {
+    public init(
+        shelf: Shelf? = .shared(),
+        pasteboard: Pasteboard? = nil,
+        connect: @escaping (Mac) -> Client = { Client($0) }
+    ) {
         self.shelf = shelf
+        self.pasteboard = pasteboard
         self.connect = connect
         library = shelf?.library()
         fetched = shelf?.fetched()
+        clips = shelf?.clips() ?? []
     }
 
     public var macros: [Macro] { library?.macros ?? [] }
@@ -94,6 +108,8 @@ public final class Phone: ObservableObject {
         library = nil
         fetched = nil
         trouble = nil
+        clips = []
+        clipTrouble = nil
     }
 
     /// The attachments of `macro` whose files are on the phone.
@@ -134,32 +150,42 @@ public final class Phone: ObservableObject {
         }
     }
 
-    /// Put what was last copied on the Mac on this phone's clipboard.
-    public func takeClipboard() async {
-        guard let mac = fetched?.mac else { return }
-        let client = connect(mac)
-        do {
-            guard let clip = try await client.clip() else {
-                notice = "\(mac.label) shares no clipboard right now"
-                return
-            }
-            switch clip.kind {
-            case "text":
-                Clipboard.set(text: clip.text)
-                notice = "Copied from \(mac.label)"
-            case "image":
-                guard let data = try await client.image(of: clip) else {
-                    notice = "Something else was copied there meanwhile. Try again."
-                    return
-                }
-                Clipboard.set(image: data, mime: clip.mime)
-                notice = "Copied an image from \(mac.label)"
-            default:
-                notice = "What was copied there is not something a phone can take"
-            }
-        } catch is CancellationError {
-        } catch {
-            notice = error.localizedDescription
+    /// Whether the Mac shares its clipboard, as of the last time it was asked.
+    public var sharing: Bool { fetched?.clipboard == true }
+
+    /// Bring the clipboard list up to date: what is on the phone's clipboard
+    /// now, if that has changed, and what was last copied on the Mac — and
+    /// hand the Mac the phone's newest. Called each time the app comes to the
+    /// front, since a phone lets nothing do this in the background.
+    public func exchangeClipboard() async {
+        guard let shelf, let mac = fetched?.mac, !exchanging else { return }
+        exchanging = true
+        defer { exchanging = false }
+        let copied = pasteboard?.fresh(for: shelf, decoding: true)
+        let result = await shelf.exchange(with: connect(mac), copied: copied, name: Clipboard.deviceName)
+        clips = shelf.clips()
+        clipTrouble = result.trouble
+        if let sharing = result.sharing, var known = fetched, known.clipboard != sharing {
+            known.clipboard = sharing
+            try? shelf.keep(known)
+            fetched = known
         }
+    }
+
+    /// Put a remembered copy back on the phone's clipboard.
+    public func copy(_ clip: ClipEntry) {
+        guard let shelf else { return }
+        if Clipboard.set(clip, in: shelf) {
+            // Reze put it there, so it is not news the next time it looks.
+            if let pasteboard { shelf.sawPasteboard(pasteboard.count()) }
+            notice = clip.isImage ? "Copied the image" : "Copied"
+        } else {
+            notice = "That image is no longer on this phone"
+        }
+    }
+
+    public func clearClips() {
+        shelf?.clearClips()
+        clips = []
     }
 }

@@ -41,21 +41,23 @@ struct SettingsView: View {
 
                     Section {
                         LabeledContent("Its clipboard", value: fetched.clipboard ? "Shared" : "Not shared")
+                    } header: {
+                        Text("Clipboard")
                     } footer: {
                         Text(fetched.clipboard
-                            ? "The first row of the list copies whatever was last copied on \(fetched.mac.label). A phone will not let an app watch the clipboard, so it comes when asked for, not by itself."
-                            : "Turn on \u{201C}Share the clipboard between my devices\u{201D} in Reze on \(fetched.mac.label) to copy from it here.")
+                            ? "What you copy on this phone goes to \(fetched.mac.label), and what was last copied there comes here, each time Reze is in front of you: this app open, or its keyboard up. A phone lets nothing watch the clipboard in the background. If iOS asks to allow the paste every time, set Settings → Apps → Reze → Paste from Other Apps to Allow."
+                            : "Turn on \u{201C}Share the clipboard between my devices\u{201D} in Reze on \(fetched.mac.label), under Settings → Clipboard history, to share the clipboard with this phone.")
                     }
                 }
 
                 Section {
                     step(1, "Open the Settings app → General → Keyboard → Keyboards → Add New Keyboard, and pick Reze.")
-                    step(2, "Tap Reze in that list and turn on Allow Full Access if you want macros with pictures or video. Text needs nothing.")
+                    step(2, "Tap Reze in that list and turn on Allow Full Access for the clipboard, and for macros with pictures or video. Typing a text macro needs nothing.")
                     step(3, "In any app, hold the globe key and choose Reze. Tap a macro to type it, or type its name first and the keyboard offers to replace it.")
                 } header: {
                     Text("The keyboard")
                 } footer: {
-                    Text("Full Access is what lets a keyboard put a picture on the clipboard. Reze\u{2019}s keyboard never uses the network: it reads the copy this app keeps.")
+                    Text("Full Access is what lets a keyboard reach the clipboard and the network. Reze\u{2019}s keyboard uses them for one thing: sharing the clipboard with the Mac you named. It talks to nothing else.")
                 }
 
                 Section {

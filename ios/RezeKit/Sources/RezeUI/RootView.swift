@@ -7,9 +7,12 @@ public struct RootView: View {
     @StateObject private var phone: Phone
     @Environment(\.scenePhase) private var phase
     @Environment(\.colorScheme) private var scheme
+    /// Which tab is showing. `-RezeTab clipboard` on the command line opens
+    /// on that one, as `-RezeMac` names the Mac.
+    @State private var tab = UserDefaults.standard.string(forKey: "RezeTab") ?? "macros"
 
     public init() {
-        _phone = StateObject(wrappedValue: Phone())
+        _phone = StateObject(wrappedValue: Phone(pasteboard: .system))
     }
 
     public init(phone: Phone) {
@@ -21,7 +24,14 @@ public struct RootView: View {
             if phone.fetched == nil {
                 ConnectView()
             } else {
-                MacrosView()
+                TabView(selection: $tab) {
+                    MacrosView()
+                        .tabItem { Label("Macros", systemImage: "text.badge.plus") }
+                        .tag("macros")
+                    ClipsView()
+                        .tabItem { Label("Clipboard", systemImage: "doc.on.clipboard") }
+                        .tag("clipboard")
+                }
             }
         }
         .environmentObject(phone)
@@ -40,6 +50,7 @@ public struct RootView: View {
                 } else {
                     await phone.refresh()
                 }
+                await phone.exchangeClipboard()
             }
         }
     }

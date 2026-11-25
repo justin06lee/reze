@@ -24,26 +24,6 @@ struct MacrosView: View {
                     }
                 }
 
-                if query.isEmpty, phone.fetched?.clipboard == true {
-                    Section {
-                        Button {
-                            Task { await phone.takeClipboard() }
-                        } label: {
-                            Label {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("\(phone.fetched?.mac.label ?? "The Mac")\u{2019}s clipboard")
-                                        .foregroundStyle(.primary)
-                                    Text("Copy what was last copied there")
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
-                                }
-                            } icon: {
-                                Image(systemName: "doc.on.clipboard")
-                            }
-                        }
-                    }
-                }
-
                 Section {
                     ForEach(results) { macro in
                         Button {

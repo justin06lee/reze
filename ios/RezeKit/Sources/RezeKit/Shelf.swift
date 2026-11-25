@@ -44,14 +44,14 @@ public struct Shelf: Sendable {
     private var fetchedFile: URL { root.appendingPathComponent("fetched.json") }
     private var assets: URL { root.appendingPathComponent("assets", isDirectory: true) }
 
-    private func read<T: Decodable>(_ type: T.Type, at url: URL) -> T? {
+    func read<T: Decodable>(_ type: T.Type, at url: URL) -> T? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .millisecondsSince1970
         return try? decoder.decode(type, from: data)
     }
 
-    private func write<T: Encodable>(_ value: T, to url: URL) throws {
+    func write<T: Encodable>(_ value: T, to url: URL) throws {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970

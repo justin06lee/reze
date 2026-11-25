@@ -11,14 +11,19 @@ final class KeyboardViewController: UIInputViewController {
     /// to this one does not make the app above it jump.
     private static let height: CGFloat = 291
 
-    private lazy var state = KeyboardState(proxy: KeyboardState.Proxy(
-        insert: { [weak self] text in self?.textDocumentProxy.insertText(text) },
-        deleteBackward: { [weak self] in self?.textDocumentProxy.deleteBackward() },
-        nextKeyboard: { [weak self] in self?.advanceToNextInputMode() },
-        context: { [weak self] in self?.textDocumentProxy.documentContextBeforeInput ?? "" },
-        fullAccess: { [weak self] in self?.hasFullAccess ?? false },
-        needsGlobe: { [weak self] in self?.needsInputModeSwitchKey ?? true }
-    ))
+    private lazy var state = KeyboardState(
+        proxy: KeyboardState.Proxy(
+            insert: { [weak self] text in self?.textDocumentProxy.insertText(text) },
+            deleteBackward: { [weak self] in self?.textDocumentProxy.deleteBackward() },
+            nextKeyboard: { [weak self] in self?.advanceToNextInputMode() },
+            context: { [weak self] in self?.textDocumentProxy.documentContextBeforeInput ?? "" },
+            fullAccess: { [weak self] in self?.hasFullAccess ?? false },
+            needsGlobe: { [weak self] in self?.needsInputModeSwitchKey ?? true }
+        ),
+        // The real clipboard: with it the keyboard notices what is copied
+        // while it is up, and shares it with the Mac. Full Access permitting.
+        pasteboard: .system
+    )
 
     override func viewDidLoad() {
         super.viewDidLoad()

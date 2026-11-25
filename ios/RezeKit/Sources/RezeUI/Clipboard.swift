@@ -89,3 +89,92 @@ public enum Clipboard {
         #endif
     }
 }
+
+/// The clipboard as the clip list needs it: whether it has changed, and what
+/// is on it. A value rather than calls to the system so that tests, and the
+/// tool that draws the screens, never touch the real one.
+public struct Pasteboard {
+    /// A number that moves each time anything is copied. Looking at it costs
+    /// nothing and asks nobody.
+    public var count: () -> Int
+    /// What is on it. On a phone this is the read that can bring up "Allow
+    /// Paste". `decoding` says whether an image offered in no ready-made
+    /// format may be redrawn as one, which takes memory a keyboard lacks.
+    public var read: (_ decoding: Bool) -> Copied?
+
+    public init(count: @escaping () -> Int, read: @escaping (_ decoding: Bool) -> Copied?) {
+        self.count = count
+        self.read = read
+    }
+
+    public static let system = Pasteboard(count: { Clipboard.changeCount }, read: { Clipboard.current(decoding: $0) })
+
+    /// What is on it, if it has changed since `shelf` last saw it.
+    func fresh(for shelf: Shelf, decoding: Bool) -> Copied? {
+        let now = count()
+        guard shelf.pasteboardSeen() != now else { return nil }
+        shelf.sawPasteboard(now)
+        return read(decoding)
+    }
+}
+
+extension Clipboard {
+    public static var changeCount: Int {
+        #if canImport(UIKit)
+        return UIPasteboard.general.changeCount
+        #elseif canImport(AppKit)
+        return NSPasteboard.general.changeCount
+        #else
+        return 0
+        #endif
+    }
+
+    /// What is on the clipboard, as far as Reze carries it: an image as the
+    /// PNG or JPEG it was copied as, or a text.
+    public static func current(decoding: Bool) -> Copied? {
+        #if canImport(UIKit)
+        let board = UIPasteboard.general
+        if board.hasImages {
+            for (type, mime) in [(UTType.png, "image/png"), (UTType.jpeg, "image/jpeg")] {
+                if let data = board.data(forPasteboardType: type.identifier), !data.isEmpty {
+                    return Int64(data.count) <= Shelf.largestClip ? .image(data, mime: mime) : nil
+                }
+            }
+            if decoding, let data = board.image?.jpegData(compressionQuality: 0.9) {
+                return .image(data, mime: "image/jpeg")
+            }
+        }
+        if board.hasStrings, let text = board.string, !text.isEmpty { return .text(text) }
+        return nil
+        #elseif canImport(AppKit)
+        let board = NSPasteboard.general
+        if let text = board.string(forType: .string), !text.isEmpty { return .text(text) }
+        if let data = board.data(forType: .png) { return .image(data, mime: "image/png") }
+        return nil
+        #else
+        return nil
+        #endif
+    }
+
+    /// Put a remembered copy back on the clipboard.
+    @discardableResult
+    public static func set(_ clip: ClipEntry, in shelf: Shelf) -> Bool {
+        if clip.isImage {
+            guard let url = shelf.url(for: clip), let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return false }
+            set(image: data, mime: clip.mime)
+        } else {
+            set(text: clip.text)
+        }
+        return true
+    }
+
+    /// What this device is called, for the Mac's history to say where a copy
+    /// came from. iOS hands apps "iPhone" or "iPad" and nothing more personal.
+    public static var deviceName: String {
+        #if canImport(UIKit)
+        return UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
+        #else
+        return "Mac"
+        #endif
+    }
+}

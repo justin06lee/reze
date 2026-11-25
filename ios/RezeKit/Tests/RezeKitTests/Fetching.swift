@@ -13,6 +13,11 @@ final class PretendMac: URLProtocol, @unchecked Sendable {
         /// A status every request gets instead, as a Mac refusing a stranger does.
         var refuse: Int?
         var asked: [String] = []
+        /// What a `POST` is answered with: 200 by a Mac that shares its
+        /// clipboard, 404 by one that does not, 400 by one too old to know.
+        var posts = 404
+        /// What was handed over: the path, its type, who said it was, the body.
+        var handed: [(path: String, type: String, from: String, body: Data)] = []
     }
 
     private static let lock = NSLock()
@@ -32,6 +37,28 @@ final class PretendMac: URLProtocol, @unchecked Sendable {
         return macs[host]?.asked ?? []
     }
 
+    static func handed(_ host: String) -> [(path: String, type: String, from: String, body: Data)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return macs[host]?.handed ?? []
+    }
+
+    /// What a request carries, which for an upload is a stream and not `httpBody`.
+    private static func body(of request: URLRequest) -> Data {
+        if let data = request.httpBody { return data }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 16 * 1024)
+        while stream.hasBytesAvailable {
+            let read = stream.read(&buffer, maxLength: buffer.count)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        return data
+    }
+
     static func client(_ host: String) -> Client {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [PretendMac.self]
@@ -47,17 +74,28 @@ final class PretendMac: URLProtocol, @unchecked Sendable {
         // The path as it went over the wire, escapes and all.
         let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath ?? url.path
 
+        let posting = request.httpMethod == "POST"
+        let sent = posting ? PretendMac.body(of: request) : Data()
         PretendMac.lock.lock()
         let known = PretendMac.macs[host]
-        PretendMac.macs[host]?.asked.append(path)
+        if posting {
+            PretendMac.macs[host]?.handed.append((
+                path,
+                request.value(forHTTPHeaderField: "Content-Type") ?? "",
+                request.value(forHTTPHeaderField: "X-Reze-From") ?? "",
+                sent
+            ))
+        } else {
+            PretendMac.macs[host]?.asked.append(path)
+        }
         PretendMac.lock.unlock()
 
         guard let known else {
             client?.urlProtocol(self, didFailWithError: URLError(.cannotConnectToHost))
             return
         }
-        let body = known.paths[path]
-        let status = known.refuse ?? (body == nil ? 404 : 200)
+        let body = posting ? Data("{}".utf8) : known.paths[path]
+        let status = known.refuse ?? (posting ? known.posts : (body == nil ? 404 : 200))
         let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: status == 200 ? body! : Data("no".utf8))

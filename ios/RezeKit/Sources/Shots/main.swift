@@ -88,6 +88,12 @@ if let typed = arguments.dropFirst().first, let mac = Mac(typed: typed) {
     ]))
     try shelf.keep(Fetched(mac: Mac(host: "mac-mini"), revision: "sample", clipboard: true))
 }
+// A clipboard of made-up copies either way: a real one is somebody's.
+shelf.clearClips()
+_ = try shelf.record(.text("https://tailscale.com/kb/1015/100.x-addresses"), from: "mac-mini", shared: true, now: Date().addingTimeInterval(-4000))
+_ = try shelf.record(.text("Pick up milk, and the charger from the office"), from: "", shared: true, now: Date().addingTimeInterval(-900))
+_ = try shelf.record(.text("func exchange(with client: Client, copied: Copied?, name: String) async -> Exchanged"), from: "mac-mini", shared: true, now: Date().addingTimeInterval(-120))
+_ = try shelf.record(.text("See you at 7 then"), from: "", shared: true, now: Date().addingTimeInterval(-20))
 
 let phoneSize = CGSize(width: 393, height: 852)
 let keyboardSize = CGSize(width: 393, height: 291)
@@ -101,6 +107,7 @@ MainActor.assumeIsolated {
 
         let phone = Phone(shelf: shelf)
         shoot(MacrosView().environmentObject(phone).tint(Theme.accent(scheme)), "macros", size: phoneSize, scheme: scheme)
+        shoot(ClipsView().environmentObject(phone).tint(Theme.accent(scheme)), "clipboard", size: phoneSize, scheme: scheme)
         shoot(SettingsView().environmentObject(phone).tint(Theme.accent(scheme)), "settings", size: phoneSize, scheme: scheme)
         if let asks = phone.macros.first(where: { !Prepared($0, in: phone.library!).variables.isEmpty }) {
             shoot(FillView(macro: asks).environmentObject(phone).tint(Theme.accent(scheme)), "fill", size: phoneSize, scheme: scheme)
@@ -124,6 +131,8 @@ MainActor.assumeIsolated {
             keyboard.look()
             shoot(KeyboardPanel(state: keyboard), "keyboard-trigger", size: keyboardSize, scheme: scheme)
         }
+        keyboard.showingClips = true
+        shoot(KeyboardPanel(state: keyboard), "keyboard-clipboard", size: keyboardSize, scheme: scheme)
     }
 }
 #else

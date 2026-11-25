@@ -539,6 +539,12 @@ where the app would be.
 A machine that was asleep when you copied does not get that copy when it
 wakes; it gets the next one.
 
+[The phone](#on-the-phone) joins in as far as a phone can: it takes the
+newest copy from the Mac it was pointed at, and hands that Mac what was
+copied on the phone, whenever its app or its keyboard is in front of you. The
+Mac treats a copy from the phone as it would one of its own, so the other
+machines get it too.
+
 ### What it does not record
 
 - **Anything an app marks private.** Password managers and their kind put
@@ -751,14 +757,24 @@ of its own — and keeps what it does to three rules:
   anything not signed in as the same user as this machine — a colleague on a
   shared tailnet, a node shared in from another one, a tagged server — is
   refused whatever it asks for.
-- **Only reading.** It hands over `macros.json` and the attachment files that
-  names — and, only with [clipboard sharing](#sharing-it-between-machines)
-  switched on, the last thing copied. No request changes anything; importing is something the other machine
-  does to itself. Sync is the same thing done unasked: each machine fetches
-  from the others and changes only itself, and nothing is ever pushed. The one
-  request that is not a fetch, `/poke`, says "I have something new" — and all
-  the machine hearing it does is go and look, at the machines it would have
-  looked at within the minute anyway.
+- **Only reading**, with one exception. It hands over `macros.json` and the
+  attachment files that names — and, only with
+  [clipboard sharing](#sharing-it-between-machines) switched on, the last
+  thing copied. No such request changes anything; importing is something the
+  other machine does to itself. Sync is the same thing done unasked: each
+  machine fetches from the others and changes only itself, and nothing is ever
+  pushed. `/poke` says "I have something new" — and all the machine hearing it
+  does is go and look, at the machines it would have looked at within the
+  minute anyway.
+
+  The exception is `POST /clip`, which hands this machine a text or an image
+  for its clipboard. It is there for [the phone](#on-the-phone), which cannot
+  be fetched from: nothing on a phone may listen once its app is off the
+  screen. It is answered only with clipboard sharing on, takes only a text or
+  a PNG, JPEG or TIFF, and puts nothing in a device's hands that it did not
+  have already — a machine that says "come and fetch what I copied" ends the
+  same way, on the clipboard here and in the history. Every other path
+  refuses a `POST`.
 
 **Let my other devices import from this one** switches it off, and then nothing
 listens. It is on by default so that a second machine finds the first without
@@ -802,11 +818,17 @@ your Macs to your phone, over Tailscale.
   offers to replace the name with the macro — expand in place, on a phone.
   A macro that is a picture or a video cannot be typed, so the keyboard puts
   it on the clipboard and says to paste.
-- **The Mac's clipboard**, when [clipboard sharing](#sharing-it-between-machines)
-  is on there: one row at the top of the list copies whatever was last copied
-  on the Mac, text or image.
+- **The clipboard**, when [clipboard sharing](#sharing-it-between-machines)
+  is on on the Mac. The app's Clipboard tab and the keyboard's clipboard key
+  show one list: what was copied on the phone and what was last copied on the
+  Mac, newest first. In the keyboard, tap a text to type it; in the app, tap
+  anything to copy it. What you copy on the phone is handed to the Mac, which
+  puts it on its own clipboard and passes it to the machines it shares with.
+  All of this happens while Reze is in front of you — see below for why not
+  otherwise.
 
-The phone only reads. The Mac is asked for things with the same requests
+The phone reads the library and never changes it. The one thing it gives the
+Mac is what you copied. The Mac is asked for things with the same requests
 another Mac would make — see [What is listening](#what-is-listening) — and it
 answers the phone for the same reason it answers them: it is signed in to
 Tailscale as you. Nothing done on the phone changes the Mac.
@@ -815,24 +837,32 @@ Tailscale as you. Nothing done on the phone changes the Mac.
 
 These are iOS's rules, not things left for later:
 
-- **No watching the clipboard.** An app may read the clipboard only while it
-  is on screen, and asks permission to. So what you copy on the Mac does not
-  appear on the phone by itself; it arrives when you ask for it. And what you
-  copy on the phone is not sent to the Mac at all: besides the watching, that
-  would need a request that changes something on the Mac, and its listener
-  has none on purpose.
+- **No watching the clipboard.** Nothing on a phone may look at the
+  clipboard unless it is on screen. So the two clipboards are evened out when
+  the app is opened, and every second or two while Reze's keyboard is up —
+  which, since a keyboard is up for most of what gets copied, is most of the
+  time if Reze's is the one you type with, and not at all if it is not. What
+  you copy with the app closed and another keyboard up goes nowhere until
+  Reze is next in front of you, and then only the newest of it.
+- **"Allow Paste?"** iOS asks before letting an app read what another app
+  copied. Set **Settings → Apps → Reze → Paste from Other Apps** to **Allow**
+  and it stops asking.
 - **No syncing in the background.** A phone gives an app a few seconds now
   and then, on its own schedule. The copy is brought up to date when the app
   is opened, not when the Mac changes.
 - **A keyboard is kept from almost everything** until its **Allow Full
-  Access** switch is turned on in Settings. Reze's keyboard never uses the
-  network either way — it reads the copy the app keeps. Full Access is what
-  lets it put a picture on the clipboard, and read the clipboard for
-  `{{clipboard}}`.
+  Access** switch is turned on in Settings. Without it Reze's keyboard types
+  text macros and shows the clipboard list as the app last left it. With it,
+  it can reach the clipboard — to notice what you copy, for macros that are
+  pictures, for `{{clipboard}}` — and the network, which it uses for one
+  thing: sharing the clipboard with the Mac you named.
 - **A keyboard has only its own keys to type with**, so it cannot ask for a
   macro's variables: each takes its default, and one with no default is left
   empty. Use the app for those.
-- **Editing is on the Mac.** The phone has no way to send a change back.
+- **Editing macros is on the Mac.** The phone has no way to send a change to
+  the library back.
+- **Files copied in Finder stay on the Mac**, as they do between Macs: only
+  text and images cross.
 
 ### Building it
 
@@ -887,6 +917,8 @@ Distribution identity, uploads it to App Store Connect, puts the account
 holder in an internal tester group called "Justin", and waits until Apple
 has processed it. Then it is in the TestFlight app on the phone, as **Reze
 Macros** (the name the record was given; on the home screen it is Reze).
+A change to the Mac's side that the phone relies on — as the clipboard was —
+means updating Reze on the Mac too.
 The build number is the time, so each upload is newer than the last. The
 first one, 0.1.0 (202611251533), went up on 2026-11-25.
 
@@ -976,8 +1008,8 @@ order worth checking:
    accepted by TestFlight; running it, and Tailscale on the phone itself,
    are first-time things. If the app says the Mac only answers your own
    devices, the phone is signed in to Tailscale as someone else.
-2. **The keyboard, on iOS.** It has never been added in Settings or brought
-   up. Start with a text macro in Notes.
+2. **The keyboard, on iOS.** Added on a phone and seen to list the macros;
+   nothing more has been reported. Start with a text macro in Notes.
 3. **Tapping.** Nothing in the simulator was tapped: copying a macro, the
    variables sheet, Settings and Forget this Mac have only been drawn and
    tested on a Mac. `ios/UITests` exists to do this and has not run.
@@ -994,7 +1026,13 @@ order worth checking:
    the first.
 7. **Replacing a typed name** deletes one character per character of the
    name. Names with emoji in them are where that count could be off.
-8. **Xcode 27.** It was built with Xcode 26.5, and nothing newer has
+8. **The clipboard, on a phone.** The Mac's side has been exercised for real
+   (a text handed to a running Mac landed on its clipboard and in its
+   history), and in a simulator the app took the Mac's newest copy. Reading a
+   phone's own clipboard has only run against a stand-in: whether iOS lets
+   the keyboard read it without asking each time, and how often it asks the
+   app, is for a phone to say.
+9. **Xcode 27.** It was built with Xcode 26.5, and nothing newer has
    compiled the app.
 
 ## Typing awareness

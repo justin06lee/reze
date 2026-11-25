@@ -540,24 +540,65 @@ fn asset(name: &str, shelf: &Shelf) -> Reply {
     }
 }
 
-/// The path a request asks for, or `None` if it is not one of ours.
-fn read_request(stream: &TcpStream) -> Option<String> {
-    let mut lines = BufReader::new(stream.take(MAX_HEAD)).lines();
+/// What a connection asks for.
+struct Request {
+    path: String,
+    /// What it sends along, if it is the one request that sends anything.
+    posted: Option<Posted>,
+}
+
+/// The body of a `POST`, as its headers describe it. Still unread.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct Posted {
+    /// The `Content-Type`, lower-cased, without its parameters.
+    kind: String,
+    length: u64,
+    /// What the sender calls itself, for the history to show. A label and no
+    /// more: who the sender *is* was settled by the gate.
+    from: String,
+}
+
+/// The request at the head of a connection, or `None` if it is not one of
+/// ours. Whatever body follows is left in `reader`.
+fn read_request(reader: &mut impl BufRead) -> Option<Request> {
+    let mut lines = reader.take(MAX_HEAD).lines();
     let first = lines.next()?.ok()?;
-    // The rest is headers. None of them changes the answer, but they are read
-    // to the end: closing a socket with part of a request still unread in it
-    // resets the connection, and the other side sees that, not the reply.
+    // The rest is headers. Only a `POST` has any that matter, but they are
+    // read to the end either way: closing a socket with part of a request
+    // still unread in it resets the connection, and the other side sees that,
+    // not the reply.
+    let mut posted = Posted::default();
     for line in lines {
-        if line.ok()?.is_empty() {
+        let line = line.ok()?;
+        if line.is_empty() {
             break;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        match name.trim().to_ascii_lowercase().as_str() {
+            "content-length" => posted.length = value.parse().ok()?,
+            "content-type" => {
+                posted.kind = value.split(';').next().unwrap_or("").trim().to_ascii_lowercase()
+            }
+            "x-reze-from" => {
+                posted.from = value.chars().filter(|c| !c.is_control()).take(40).collect()
+            }
+            _ => {}
         }
     }
     let mut words = first.split_whitespace();
-    if words.next()? != "GET" {
-        return None;
-    }
+    let posted = match words.next()? {
+        "GET" => None,
+        "POST" => Some(posted),
+        _ => return None,
+    };
     let target = words.next()?;
-    Some(target.split(['?', '#']).next().unwrap_or(target).to_string())
+    Some(Request {
+        path: target.split(['?', '#']).next().unwrap_or(target).to_string(),
+        posted,
+    })
 }
 
 fn send(stream: &mut TcpStream, reply: Reply) -> std::io::Result<()> {
@@ -605,12 +646,19 @@ fn serve(mut stream: TcpStream, allowed: bool, shelf: &Shelf) {
     let _ = stream.set_write_timeout(Some(STALL));
 
     let from = stream.peer_addr().ok().map(|peer| peer.ip());
-    let request = read_request(&stream);
+    let mut reader = BufReader::new(&stream);
+    let request = read_request(&mut reader);
     let reply = match (allowed, request) {
         (false, _) => Reply::Error(403, "this is not one of that user's devices"),
         (true, None) => Reply::Error(400, "not a request Reze understands"),
-        (true, Some(path)) => clipboard(&path, from).unwrap_or_else(|| answer(&path, shelf)),
+        (true, Some(Request { path, posted: None })) => {
+            clipboard(&path, from).unwrap_or_else(|| answer(&path, shelf))
+        }
+        (true, Some(Request { path, posted: Some(posted) })) => {
+            handed(&path, posted, &mut reader, from)
+        }
     };
+    drop(reader);
     let _ = send(&mut stream, reply);
 }
 
@@ -1513,6 +1561,111 @@ fn clipboard(path: &str, from: Option<IpAddr>) -> Option<Reply> {
     }
 }
 
+/// Take what a device hands over: the one request that brings something
+/// rather than asking for something.
+///
+/// It exists for a phone. A machine that copies something says so and is
+/// fetched from ([`take_clip`]); a phone cannot be fetched from, because
+/// nothing on it is allowed to listen once its app is off the screen. So it
+/// brings what it copied — and that puts nothing in its hands a machine did
+/// not already have, since telling this one to come and fetch ends the same
+/// way: on the clipboard here, and in the history.
+///
+/// Only with clipboard sharing on, and only the clipboard: every other path
+/// is as read-only as it ever was.
+fn handed(path: &str, posted: Posted, body: &mut impl Read, from: Option<IpAddr>) -> Reply {
+    // Whatever the answer, what was sent is read first: see `read_request`.
+    let refuse = |body: &mut dyn Read, reply: Reply| {
+        let _ = std::io::copy(&mut body.take(posted.length.min(MAX_CLIP_IMAGE)), &mut std::io::sink());
+        reply
+    };
+    if path != "/clip" {
+        return refuse(body, Reply::Error(404, "nothing here takes that"));
+    }
+    if !CLIPPING.load(Ordering::SeqCst) {
+        return refuse(body, Reply::Error(404, "no clipboard is shared here"));
+    }
+    let name = match (posted.from.trim(), from) {
+        ("", Some(ip)) => ip.to_string(),
+        ("", None) => "another device".to_string(),
+        (said, _) => said.to_string(),
+    };
+    let arrival = match arrival(&posted, body, &crate::history::clip_dir(), name) {
+        Ok(arrival) => arrival,
+        Err(why) => return Reply::Error(400, why),
+    };
+    match crate::history::receive(arrival) {
+        // New here, so new to the machines this one shares with: they are
+        // told, and come and fetch it as they would anything copied here.
+        Ok(true) => copied(),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("reze: a copy from a phone could not be taken: {e}");
+            return Reply::Error(500, "it could not be put on the clipboard here");
+        }
+    }
+    Reply::Json(b"{}".to_vec())
+}
+
+/// Read what was handed over into something the history can take: a text, or
+/// an image written into `dir` under a name of our own.
+fn arrival(
+    posted: &Posted,
+    body: &mut impl Read,
+    dir: &Path,
+    from: String,
+) -> Result<crate::history::Arrival, &'static str> {
+    let whole = |body: &mut dyn Read, into: &mut dyn Write| {
+        std::io::copy(&mut body.take(posted.length), into).is_ok_and(|read| read == posted.length)
+    };
+    match posted.kind.as_str() {
+        _ if posted.length == 0 => Err("nothing was sent"),
+        "text/plain" => {
+            if posted.length > MAX_CLIP {
+                return Err("that is more text than a clipboard is shared for");
+            }
+            let mut raw = Vec::with_capacity(posted.length as usize);
+            if !whole(body, &mut raw) {
+                return Err("less arrived than was promised");
+            }
+            let text = String::from_utf8(raw).map_err(|_| "that text is not UTF-8")?;
+            Ok(crate::history::Arrival {
+                kind: "text".into(),
+                text,
+                file: String::new(),
+                mime: "text/plain".into(),
+                from,
+            })
+        }
+        "image/png" | "image/jpeg" | "image/tiff" => {
+            if posted.length > MAX_CLIP_IMAGE {
+                return Err("that image is bigger than a clipboard is shared for");
+            }
+            let name = format!(
+                "{}.{}",
+                uuid::Uuid::new_v4(),
+                crate::assets::ext_for_mime(&posted.kind)
+            );
+            let path = dir.join(&name);
+            let written = std::fs::create_dir_all(dir)
+                .and_then(|_| std::fs::File::create(&path))
+                .is_ok_and(|mut file| whole(body, &mut file));
+            if !written {
+                let _ = std::fs::remove_file(&path);
+                return Err("less arrived than was promised");
+            }
+            Ok(crate::history::Arrival {
+                kind: "image".into(),
+                text: String::new(),
+                file: name,
+                mime: posted.kind.clone(),
+                from,
+            })
+        }
+        _ => Err("only text and images are taken"),
+    }
+}
+
 /// Fetch what was just copied on the machine at `from`, and put it on this
 /// one's clipboard.
 fn take_clip(from: Ipv4Addr) {
@@ -1885,7 +2038,7 @@ mod tests {
         let at = listener.local_addr().unwrap();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let _ = read_request(&stream);
+            let _ = read_request(&mut BufReader::new(&stream));
             let body = "<html>hello</html>";
             let _ = write!(
                 stream,
@@ -2070,6 +2223,73 @@ mod tests {
         // And everything else is not the clipboard's to answer.
         assert!(clipboard("/library", stranger).is_none());
         assert!(clipboard("/poke", stranger).is_none());
+    }
+
+    #[test]
+    fn a_request_is_read_with_what_it_brings_left_unread() {
+        let mut raw = std::io::Cursor::new(
+            b"POST /clip?x=1 HTTP/1.1\r\nHost: mini\r\ncontent-type: Text/Plain; charset=utf-8\r\n\
+              Content-Length: 5\r\nX-Reze-From: Justin's\tiPhone\r\n\r\nhello"
+                .to_vec(),
+        );
+        let request = read_request(&mut raw).unwrap();
+        assert_eq!(request.path, "/clip");
+        let posted = request.posted.unwrap();
+        assert_eq!((posted.kind.as_str(), posted.length), ("text/plain", 5));
+        assert_eq!(posted.from, "Justin'siPhone");
+        let mut rest = String::new();
+        raw.read_to_string(&mut rest).unwrap();
+        assert_eq!(rest, "hello");
+
+        let get = read_request(&mut std::io::Cursor::new(b"GET /reze HTTP/1.1\r\n\r\n".to_vec())).unwrap();
+        assert!(get.path == "/reze" && get.posted.is_none());
+        for other in ["PUT /clip HTTP/1.1\r\n\r\n", "DELETE /library HTTP/1.1\r\n\r\n", "\r\n"] {
+            assert!(read_request(&mut std::io::Cursor::new(other.as_bytes().to_vec())).is_none());
+        }
+    }
+
+    #[test]
+    fn what_a_phone_hands_over_is_a_text_or_an_image_and_nothing_else() {
+        let dir = scratch();
+        let posted = |kind: &str, length: u64| Posted { kind: kind.into(), length, from: String::new() };
+        let take = |kind: &str, body: &[u8], length: u64| {
+            arrival(&posted(kind, length), &mut std::io::Cursor::new(body.to_vec()), &dir, "iPhone".into())
+        };
+
+        let text = take("text/plain", "héllo, and more".as_bytes(), 6).unwrap();
+        assert_eq!((text.kind.as_str(), text.text.as_str(), text.from.as_str()), ("text", "héllo", "iPhone"));
+
+        let image = take("image/png", b"not really a png", 16).unwrap();
+        assert_eq!(image.kind, "image");
+        assert!(image.file.ends_with(".png") && !image.file.contains('/'));
+        assert_eq!(std::fs::read(dir.join(&image.file)).unwrap(), b"not really a png");
+
+        assert!(take("text/plain", b"", 0).is_err(), "nothing was taken as something");
+        assert!(take("text/plain", b"short", 50).is_err(), "half a text was taken");
+        assert!(take("text/plain", &[0xff, 0xfe], 2).is_err(), "bytes that are not text were taken");
+        assert!(take("text/plain", b"x", MAX_CLIP + 1).is_err());
+        assert!(take("image/png", b"x", MAX_CLIP_IMAGE + 1).is_err());
+        assert!(take("application/x-sh", b"rm -rf", 6).is_err(), "a file was taken");
+        // Half an image leaves nothing behind.
+        assert!(take("image/jpeg", b"half", 400).is_err());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn nothing_is_taken_while_the_clipboard_is_not_shared() {
+        assert!(!CLIPPING.load(Ordering::SeqCst));
+        let posted = Posted { kind: "text/plain".into(), length: 5, from: String::new() };
+        // Refused, and what was sent is read all the same, so that the refusal
+        // is what the sender sees rather than a connection reset.
+        let mut body = std::io::Cursor::new(b"hello".to_vec());
+        assert_eq!(code_of(&handed("/clip", posted.clone(), &mut body, None)), 404);
+        assert_eq!(body.position(), 5);
+        // And nothing else takes anything, shared or not.
+        for path in ["/library", "/assets/a.png", "/reze", "/poke", "/clip/x.png"] {
+            let mut body = std::io::Cursor::new(b"hello".to_vec());
+            assert_eq!(code_of(&handed(path, posted.clone(), &mut body, None)), 404, "{path}");
+        }
     }
 
     #[test]
