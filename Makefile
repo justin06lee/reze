@@ -3,7 +3,7 @@ BUNDLE_ID := com.justin06lee.reze
 UNAME     := $(shell uname -s)
 
 .PHONY: all build notarize install update stop reset-permissions launch signing \
-        ios ios-test ios-shots ios-fixtures ios-icon ios-sim ios-uitest
+        ios ios-test ios-shots ios-fixtures ios-icon ios-sim ios-uitest ios-testflight
 
 ifeq ($(UNAME),Darwin)
 
@@ -192,6 +192,12 @@ ios-uitest:
 	TEST_RUNNER_REZE_LIVE="$(MAC)" TEST_RUNNER_REZE_SHOTS="$(CURDIR)/ios/shots" \
 	xcodebuild -project ios/Reze.xcodeproj -scheme Reze -destination "name=Reze iPhone" \
 		-derivedDataPath ios/build test
+
+# A signed build, uploaded to TestFlight for the team's own testers.
+#   make ios-testflight            archive, upload, wait until it can be installed
+#   make ios-testflight UPLOAD=0   archive and export an .ipa only
+ios-testflight:
+	@UPLOAD=$(or $(UPLOAD),1) ios/testflight.sh
 
 # Write the Xcode project and open it. Running it on a phone is then Xcode's
 # to do: pick the phone at the top of the window and press Run.
