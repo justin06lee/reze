@@ -188,6 +188,41 @@ public struct Client: Sendable {
         try await get("/clip/\(Client.encode(clip.file))")
     }
 
+    /// Hand the Mac a text copied on the phone, for its clipboard. `false`
+    /// if the Mac shares no clipboard.
+    public func send(text: String, from name: String) async throws -> Bool {
+        try await post("/clip", Data(text.utf8), type: "text/plain; charset=utf-8", from: name)
+    }
+
+    /// The same, for an image: PNG, JPEG or TIFF, as it is.
+    public func send(image: Data, mime: String, from name: String) async throws -> Bool {
+        try await post("/clip", image, type: mime, from: name)
+    }
+
+    /// The one request that brings the Mac something. A Mac that predates it
+    /// answers 400, which comes out as `Trouble.status(400)`.
+    private func post(_ path: String, _ body: Data, type: String, from name: String) async throws -> Bool {
+        var request = URLRequest(url: try url(path))
+        request.httpMethod = "POST"
+        request.setValue(type, forHTTPHeaderField: "Content-Type")
+        // Header values are ASCII; a name that is not is left for the Mac to
+        // make up.
+        let plain = String(name.unicodeScalars.filter { $0.isASCII && $0.value >= 0x20 && $0.value != 0x7f }.prefix(40))
+        if !plain.isEmpty { request.setValue(plain, forHTTPHeaderField: "X-Reze-From") }
+        do {
+            let (_, response) = try await session.upload(for: request, from: body)
+            return try check(response) == 200
+        } catch let trouble as Trouble {
+            throw trouble
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
+        } catch {
+            throw Trouble.unreachable(mac.host)
+        }
+    }
+
     private func download(_ path: String, to destination: URL) async throws -> Bool {
         do {
             let (landed, response) = try await session.download(from: try url(path))
